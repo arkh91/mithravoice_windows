@@ -79,30 +79,42 @@ TRANSLATION_FRAMELESS = True
 # Draw only the caption panel, letting whatever is behind show through
 # the margin around it.
 #
-# This does NOT use pywebview's transparent=True. That path sets the
-# form's BackColor and TransparencyKey to pure red and relies on
-# WebView2 honouring DefaultBackgroundColor; on a real 2560x1440
-# Windows 11 machine at 150% it produced a window whose background
-# measured exactly (240,240,240) — SystemColors.Control, the untouched
-# WinForms default — meaning neither branch of that code had taken
-# effect and WebView2 was compositing onto plain grey. Rather than
-# depend on it, the colour key is applied here directly with
-# SetLayeredWindowAttributes, on the same window handle already looked
-# up for positioning. See _apply_color_key().
+# HOW THIS ACTUALLY WORKS, because it is not obvious and the obvious
+# version does not work. Three layers have to cooperate:
+#
+#   1. The PAGE must paint nothing (translation.html keeps html/body
+#      transparent). Anything the page paints is drawn by WebView2.
+#   2. WEBVIEW2 must have DefaultBackgroundColor = Transparent so it
+#      composites nothing of its own. pywebview sets this when the
+#      window is created with transparent=True, and this half works.
+#   3. The FORM behind WebView2 paints TRANSLATION_KEY_COLOR, and that
+#      colour is punched out of the window with
+#      SetLayeredWindowAttributes.
+#
+# The key must be painted by the FORM, never by the page. WebView2
+# renders through DirectComposition, on top of the layered window
+# surface, and that content is NOT subject to the parent's colour key.
+# Painting the key colour in CSS produces a window that is genuinely
+# click-through — Windows keys the form underneath — while WebView2
+# cheerfully paints the colour straight back over the hole, so it
+# looks solid and behaves transparent. That exact symptom is what led
+# here.
+#
+# pywebview is supposed to do step 3 too, but on this build it does
+# not: the form's background measured (240,240,240), SystemColors
+# .Control, i.e. never assigned. So step 3 is done here by hand, in
+# _paint_form_background() and _apply_color_key().
 TRANSLATION_TRANSPARENT = True
 
-# The colour punched out of the window. A near-black nothing else
-# uses, rather than the conventional magenta or red, for two reasons:
-#   - If the key is ever NOT applied (an old Windows build, a failed
-#     call), the window falls back to showing this colour flat. A
-#     near-black reads as the app's normal dark background; magenta
-#     would be a screenful of eye-searing pink.
+# The colour the FORM paints and Windows punches out. A near-black
+# nothing else uses, rather than the conventional magenta or red:
+#   - If any step above fails, the window falls back to showing this
+#     colour flat. Near-black reads as the app's normal dark
+#     background; magenta would be a screenful of eye-searing pink.
 #   - The caption text is outlined in pure black (#000). Antialiased
-#     pixels along that outline blend toward the key colour, and
-#     blending black into near-black is invisible. Blending black into
-#     magenta would fringe every glyph.
-# This must stay in step with translation.html's page background, and
-# nothing else in that file may use this exact value.
+#     pixels along that outline blend toward whatever is behind, and
+#     blending black into near-black is invisible.
+# Nothing in translation.html may paint this colour.
 TRANSLATION_KEY_COLOR = (1, 2, 3)
 TRANSLATION_KEY_COLOR_HEX = "#010203"
 
@@ -313,6 +325,62 @@ def _bottom_strip_geometry(window):
 # keeps whatever geometry create_window gave it, exactly as before.
 
 
+def _paint_form_background(window, rgb) -> bool:
+    """
+    _paint_form_background(window, rgb)
+    Usage: pass the Translation window object and an (r, g, b) tuple.
+    Sets the underlying WinForms Form's BackColor to that colour so
+    there is something for the colour key to punch out. Returns True
+    if it was applied.
+
+    This exists because pywebview does not reliably set it. Measured on
+    the target machine, the form's background was exactly
+    (240,240,240) — SystemColors.Control, the .NET default, meaning
+    neither branch of pywebview's own transparency code had assigned
+    it. Without this the colour key has nothing to match and the
+    window shows flat grey.
+
+    Reaches through to the Form via BrowserView.instances, which is
+    pywebview internals rather than public API — hence the broad
+    guard: if a future version renames any of it, transparency
+    silently degrades to a flat near-black strip instead of raising.
+
+    The assignment is marshalled with Form.Invoke because this is
+    called from the placement thread, and touching a WinForms
+    control's properties from a non-UI thread throws
+    InvalidOperationException.
+    """
+    try:
+        from webview.platforms.winforms import BrowserView
+        from System import Action
+        from System.Drawing import Color
+    except Exception as exc:  # noqa: BLE001 - not Windows, or internals moved
+        print(f"[TRANSLATION] cannot reach WinForms internals ({exc!r}); skipping form background", flush=True)
+        return False
+
+    form = BrowserView.instances.get(getattr(window, "uid", None))
+    if form is None:
+        print("[TRANSLATION] no BrowserView instance for the Translation window", flush=True)
+        return False
+
+    red, green, blue = rgb
+    color = Color.FromArgb(255, red, green, blue)
+
+    def _assign():
+        form.BackColor = color
+
+    try:
+        if form.InvokeRequired:
+            form.Invoke(Action(_assign))
+        else:
+            _assign()
+        print(f"[TRANSLATION] form background painted rgb{tuple(rgb)}", flush=True)
+        return True
+    except Exception as exc:  # noqa: BLE001 - cosmetic; never take the app down for it
+        print(f"[TRANSLATION] could not set form background: {exc!r}", flush=True)
+        return False
+
+
 def _apply_color_key(hwnd) -> bool:
     """
     _apply_color_key(hwnd)
@@ -449,6 +517,10 @@ def _force_window_rect(title: str, x: int, y: int, width: int, height: int) -> b
     user32.GetWindowRect(hwnd, ctypes.byref(before))
 
     if TRANSLATION_TRANSPARENT:
+        # Order matters only in that both must happen before the
+        # window is next painted; the key is what makes the colour
+        # disappear, the colour is what gives the key something to
+        # match.
         _apply_color_key(hwnd)
 
     SWP_NOZORDER = 0x0004
@@ -1050,15 +1122,15 @@ class Api:
                 # corner and the Esc key, both routed through
                 # close_translation_window().
                 frameless=TRANSLATION_FRAMELESS,
-                # Deliberately transparent=False. pywebview's own
-                # transparency measurably did not work here (see the
-                # note on TRANSLATION_TRANSPARENT); _apply_color_key()
-                # does it instead, once the window exists.
-                # background_color is set to the key colour so that any
-                # region the WebView2 control does not paint is keyed
-                # out too, rather than showing as a stripe of some
-                # other colour along an edge.
-                transparent=False,
+                # transparent=True is needed for ONE thing: it makes
+                # pywebview set the WebView2 control's
+                # DefaultBackgroundColor to Transparent, so the browser
+                # paints nothing and the form behind it shows through.
+                # That half demonstrably works. The other half — the
+                # form's own BackColor and colour key — is not applied
+                # on this build, so _prepare_translation_window() and
+                # _apply_color_key() do it directly instead.
+                transparent=TRANSLATION_TRANSPARENT,
                 # pywebview's easy_drag attaches a mousedown handler to
                 # the whole window and moves it on any subsequent mouse
                 # movement. On a frameless window that is normally how
@@ -1170,6 +1242,13 @@ class Api:
             return
 
         x, y, width, height = geometry
+
+        if TRANSLATION_TRANSPARENT:
+            # Give the colour key something to match. Done here rather
+            # than at creation because it needs the Form to exist, and
+            # before placement so the window is never painted grey
+            # even briefly.
+            _paint_form_background(self._translation_window, TRANSLATION_KEY_COLOR)
 
         def _place():
             for _ in range(10):

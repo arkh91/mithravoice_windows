@@ -31,19 +31,21 @@
   applied on load by applyStyleFromParams() below.
 -->
 <style>
-  /* THE KEY COLOUR — must stay exactly rgb(1,2,3), matching
-     TRANSLATION_KEY_COLOR in api.py, which punches every pixel of this
-     colour out of the window with SetLayeredWindowAttributes (see
-     _apply_color_key).
+  /* MUST paint nothing. Do not set a colour here, not even the key
+     colour api.py punches out.
 
-     This is painted OPAQUELY and removed afterwards by Windows. It is
-     not CSS transparency. Writing `transparent` here instead leaves
-     WebView2 compositing onto whatever the form's background happens
-     to be, which is how this window previously came out a solid
-     (240,240,240) grey.
+     Anything the page paints is drawn by WebView2, which renders
+     through DirectComposition on top of the layered window surface
+     and is therefore NOT subject to the parent window's colour key.
+     Painting the key colour here produces a window that is genuinely
+     click-through — Windows keys the form underneath — while WebView2
+     paints the colour straight back over the hole. It looks solid and
+     behaves transparent, which is a confusing failure to diagnose.
 
-     If these two values ever drift apart nothing errors — the window
-     just renders a flat near-black rectangle. */
+     Leaving this transparent means WebView2 composites nothing, the
+     form's own background shows through, and THAT is what gets keyed
+     out. See the mechanism note above TRANSLATION_TRANSPARENT in
+     api.py. */
   html, body {
     margin: 0;
     padding: 0;
@@ -51,7 +53,7 @@
     height: 100%;
     overflow: hidden;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    background: rgb(1, 2, 3);
+    background: transparent;
     color: #ffffff;
   }
 
@@ -70,7 +72,7 @@
        this margin is transparent, so it is the only part of the
        window the desktop shows through. */
     padding: 6px;
-    background: rgb(1, 2, 3);
+    background: transparent;
   }
 
   /* The panel fills the window rather than hugging its text, so the
@@ -90,20 +92,20 @@
        close button in the corner. */
     padding: clamp(10px, 3%, 24px) clamp(48px, 5%, 64px) clamp(10px, 3%, 24px) clamp(16px, 3%, 40px);
     border-radius: 10px;
-    /* No background and no border by default, so the key colour
-       painted by .screen shows through here and is punched out.
+    /* No background and no border by default, so the transparent
+       page shows through and the form's keyed-out background does
+       too.
 
-       Transparency in this window is BINARY: Windows removes only
-       pixels that are EXACTLY the key colour. A partly-transparent
-       panel does not blend with the desktop, it blends with the key
-       colour and stays opaque as a near-black block. So nothing drawn
-       over the see-through area may use fractional alpha, an opacity
-       below 1, or a blurred shadow — which is why the text outline
-       below is a hard opaque shadow and the close button is dimmed by
-       colour rather than opacity.
+       Transparency here is BINARY: Windows removes only the pixels
+       that are exactly the key colour the form painted. A
+       partly-transparent panel does not blend with the desktop — the
+       fraction of it that WebView2 draws is opaque, so it reads as a
+       dark film. Nothing drawn over the see-through area should use
+       fractional alpha, an opacity below 1, or a blurred shadow,
+       which is why the text outline below is a hard opaque shadow and
+       the close button is dimmed by colour rather than opacity.
 
-       .light and .custom deliberately opt back into a solid panel;
-       being fully opaque, they never expose the key colour at all. */
+       .light and .custom deliberately opt back into a solid panel. */
     background: none;
     border: none;
   }
