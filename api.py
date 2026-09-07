@@ -43,6 +43,7 @@ from licensing import (
 )
 from pipeline import TranslationPipeline
 from updater import check_for_update as _check_for_update
+from updater import get_current_version
 
 
 def _log_click(func):
@@ -78,7 +79,6 @@ class Api:
         # resizes/moves the window down to a small caption bar, so
         # restore_full_size() can put it back exactly where it was.
         self._pre_shrink_geometry = None
-        self._caption_overlay = None
         self._capture_stream = None
         self._logged_first_push = False
         self._logged_no_window_warning = False
@@ -124,16 +124,7 @@ class Api:
         is_final = "true" if result.is_final else "false"
         script = f"window.updateSubtitle({original}, {translated}, {is_final})"
         if self._window is not None:
-            try:
-                self._window.evaluate_js(script)
-            except Exception as e:
-                print(f"[PUSH] main window update failed: {e!r}", flush=True)
-
-        if self._caption_overlay is not None:
-            try:
-                self._caption_overlay.evaluate_js(script)
-            except Exception as e:
-                print(f"[PUSH] captions window update failed: {e!r}", flush=True)
+            self._window.evaluate_js(script)
 
     def _push_engine_change(self, mode: str) -> None:
         """
@@ -189,7 +180,10 @@ class Api:
         Bound to the Settings page's "Deactivate this device" button.
         Frees the seat on the server (best-effort — still clears the
         local cache even if offline) and clears the cached token, so
-        the license gate reappears on next launch.
+        the app is no longer licensed on this device. index.html shows
+        the license gate again immediately after this call succeeds
+        (see its deactivateDeviceBtn click handler) rather than
+        waiting for a relaunch.
         """
         deactivate_this_device(key_code)
         return {"ok": True}
@@ -358,118 +352,122 @@ class Api:
             "notes": result.notes,
         }
 
-    @_log_click
-    def open_caption_overlay(self, overlay_settings: Optional[dict] = None):
+    def get_app_version(self):
         """
-        Minimize the main MithraVoice window and open a separate native
-        "MithraVoice Captions" window.
+        get_app_version()
+        Usage (JS): window.pywebview.api.get_app_version().then(result => ...)
+        Called when the About page is opened. Unlike check_for_update()
+        above, this needs no network at all — it just reads the VERSION
+        file bundled into this build (see updater.py's
+        get_current_version), so the About page always shows the
+        actual running version even fully offline.
+        """
+        return {"version": get_current_version()}
+
+    @_log_click
+    def shrink_to_captions(self, overlay_settings: Optional[dict] = None):
+        """
+        shrink_to_captions(overlay_settings=None)
+        Usage (JS): window.pywebview.api.shrink_to_captions({position, displayMode, fontSize})
+        Replaces the old minimize_window() + open_caption_overlay()
+        flow, which opened a SECOND native WebView2 window to act as
+        an always-on-top captions overlay while the main window sat
+        minimized in the taskbar. That approach hit a confirmed,
+        persistent rendering bug on a real Windows machine: the second
+        window would report itself as created, shown, correctly
+        positioned, and topmost via every pywebview/Win32 API checked,
+        yet still not actually paint on screen in most tests — flaky
+        in a way that resisted several rounds of fixes (a topmost
+        z-order bug, an event-registration race, a maximize/restore
+        workaround, a DPI-scale mismatch) without ever becoming fully
+        reliable.
+        This sidesteps that whole class of bug by never creating a
+        second window at all: it resizes and moves THIS window down
+        to a small caption-bar size/position, and index.html's own JS
+        (see shrinkToCaptions() there) swaps to a caption-only layout
+        via the '.compact-mode' CSS class (hiding the sidebar,
+        settings panel, and control bar). Bound to the stage's
+        bottom-right button (id="maximizeBtn" in index.html).
+        Captions keep updating exactly as before via the same
+        _push_result() -> evaluate_js() path — there's no second DOM
+        to keep in sync, so none of the old "replay the last caption
+        when the overlay opens" logic is needed anymore either.
+        No-ops quietly if called before attach_window() has run.
         """
         if self._window is None:
-            return {"ok": False, "error": "main_window_not_attached"}
-
-        if self._caption_overlay is not None:
-            try:
-                self._caption_overlay.restore()
-                self._caption_overlay.bring_to_front()
-                return {"ok": True, "already_open": True}
-            except Exception:
-                self._caption_overlay = None
-
+            return
+        self._pre_shrink_geometry = (
+            self._window.x, self._window.y, self._window.width, self._window.height,
+        )
         overlay_settings = overlay_settings or {}
         position = overlay_settings.get("position", "bottom")
-        display_mode = overlay_settings.get("displayMode", "both")
-        font_size = overlay_settings.get("fontSize", 24)
 
         screen = self._find_main_window_monitor()
         if screen is None:
             screen = self._screen_for_point((self._window.x, self._window.y))
 
-        width = 1000
-        height = 190
-
         if screen is not None:
-            width = int(screen.width * (0.60 if position == "center" else 0.80))
-            width = max(500, min(width, screen.width - 40))
-
+            third = screen.height // 3
             if position == "top":
-                x = screen.x + (screen.width - width) // 2
-                y = screen.y + 40
+                x, y, width, height = screen.x, screen.y, screen.width, third
             elif position == "center":
+                # A true centered box (60% of screen width, one third
+                # of screen height) rather than a full-width strip —
+                # matches "in the middle of the page" rather than just
+                # vertically-middle.
+                width = int(screen.width * 0.6)
+                height = third
                 x = screen.x + (screen.width - width) // 2
                 y = screen.y + (screen.height - height) // 2
-            else:
-                x = screen.x + (screen.width - width) // 2
-                y = screen.y + screen.height - height - 40
+            else:  # "bottom" (and default)
+                x, y, width, height = screen.x, screen.y + screen.height - third, screen.width, third
         else:
-            x, y = 100, 100
+            # No screen info available for some reason — still shrink
+            # the window, just without repositioning it.
+            x = y = None
+            width, height = 560, 200
 
-        params = urlencode({
-            "position": position,
-            "displayMode": display_mode,
-            "fontSize": font_size,
-        })
-
-        try:
-            overlay = webview.create_window(
-                "MithraVoice Captions",
-                f"overlay.html?{params}",
-                js_api=self,
-                x=x,
-                y=y,
-                width=width,
-                height=height,
-                min_size=(500, 140),
-                background_color="#0b0e14",
-                on_top=True,
-            )
-
-            self._caption_overlay = overlay
-            overlay.events.closed += self._on_caption_overlay_closed
-
-            print(
-                f"[OVERLAY] created x={x} y={y} width={width} height={height}",
-                flush=True,
-            )
-
-            # Only minimize after the caption window was created.
-            self._window.minimize()
-            return {"ok": True}
-
-        except Exception as e:
-            self._caption_overlay = None
-            print(f"[OVERLAY] failed to create captions window: {e!r}", flush=True)
-            return {"ok": False, "error": str(e)}
-
-    def _on_caption_overlay_closed(self):
-        """Restore the main window after the captions window is closed."""
-        self._caption_overlay = None
-        if self._window is not None:
-            try:
-                self._window.restore()
-                self._window.bring_to_front()
-            except Exception as e:
-                print(f"[OVERLAY] restore failed: {e!r}", flush=True)
+        print(
+            f"[SHRINK] chosen_screen={screen} -> geometry x={x} y={y} "
+            f"width={width} height={height}",
+            flush=True,
+        )
+        self._window.resize(width, height)
+        if x is not None and y is not None:
+            self._window.move(x, y)
 
     @_log_click
-    def close_caption_overlay(self):
-        """Close captions and restore the main MithraVoice window."""
-        overlay = self._caption_overlay
-        self._caption_overlay = None
+    def restore_full_size(self):
+        """
+        restore_full_size()
+        Usage (JS): window.pywebview.api.restore_full_size()
+        Undoes shrink_to_captions() above: resizes/moves this window
+        back to exactly where and how big it was before shrinking.
+        Bound to the Exit button that appears while '.compact-mode' is
+        on #app (id="exitCompactBtn" in index.html), which is also
+        responsible for removing that CSS class so the full UI
+        reappears. No-ops quietly if called before a shrink happened.
+        """
+        if self._window is None or self._pre_shrink_geometry is None:
+            return
+        x, y, width, height = self._pre_shrink_geometry
+        self._window.resize(width, height)
+        self._window.move(x, y)
+        self._pre_shrink_geometry = None
 
-        if overlay is not None:
-            try:
-                overlay.destroy()
-            except Exception as e:
-                print(f"[OVERLAY] close failed: {e!r}", flush=True)
-
+    @_log_click
+    def exit_app(self):
+        """
+        exit_app()
+        Usage (JS): window.pywebview.api.exit_app()
+        Closes the app entirely. Bound to the sidebar's Exit button
+        (id="exitAppBtn" in index.html), below About. destroy() closes
+        just this window; since main.py only ever creates the one
+        (master) window, that's enough to end webview.start()'s event
+        loop and let the process exit normally afterward.
+        """
         if self._window is not None:
-            try:
-                self._window.restore()
-                self._window.bring_to_front()
-            except Exception as e:
-                print(f"[OVERLAY] main restore failed: {e!r}", flush=True)
-
-        return {"ok": True}
+            self._window.destroy()
 
     def _find_main_window_monitor(self):
         """

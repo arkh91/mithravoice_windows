@@ -122,6 +122,15 @@
 
   .nav-item.active svg { opacity: 1; }
 
+  /* Exit is destructive (closes the app), not a view switch, so it
+     gets its own hover treatment instead of the gold "active" look
+     the other nav items use. */
+  .nav-item-exit:hover {
+    background: rgba(220, 68, 68, 0.08);
+    border-color: rgba(220, 68, 68, 0.35);
+    color: #e05a5a;
+  }
+
   .sidebar-footer {
     margin-top: auto;
     display: flex;
@@ -192,36 +201,6 @@
   .maximize-btn:hover { border-color: var(--gold); color: var(--gold); }
   .maximize-btn.hidden { display: none; }
 
-  .select-app-wrap {
-    position: absolute;
-    bottom: 18px;
-    right: 66px;
-    z-index: 5;
-  }
-  .select-app-btn {
-    display: flex; align-items: center; gap: 7px;
-    height: 36px;
-    padding: 0 14px;
-    border-radius: 999px;
-    background: rgba(10,13,20,0.55);
-    backdrop-filter: blur(6px);
-    border: 1px solid rgba(255,255,255,0.08);
-    color: var(--text-primary);
-    font-size: 12.5px;
-    font-family: var(--font-body);
-    cursor: pointer;
-  }
-  .select-app-btn:hover { border-color: var(--gold); color: var(--gold); }
-  .select-app-btn.active { border-color: var(--gold); color: var(--gold); }
-
-  #appPickerDropdown {
-    bottom: calc(100% + 8px);
-    top: auto;
-    right: 0;
-    left: auto;
-    width: 260px;
-  }
-
   .exit-compact-btn {
     position: absolute;
     top: 18px;
@@ -244,21 +223,12 @@
   /* Compact/maximized mode: sidebar, right settings panel, and the
      mic/pause control bar are all hidden — only the stage (scene +
      caption, using whatever Display/Position/Style/Appearance/Font
-     settings were already set, plus whatever app is currently
-     selected via Select App) and the Exit button remain. Exiting
+     settings were already set) and the Exit button remain. Exiting
      restores the normal three-column layout exactly as it was. */
   #app.compact-mode { grid-template-columns: 1fr; }
   #app.compact-mode .sidebar { display: none; }
   #app.compact-mode #liveSettingsPanel { display: none; }
   #app.compact-mode .control-bar { display: none; }
-
-  /* The live-captured frame of the selected app, shown behind the
-     caption in place of the default mountain-scene graphic. */
-  .captured-frame {
-    width: 100%; height: 100%;
-    object-fit: contain;
-    background: #000;
-  }
 
   .dot {
     width: 7px; height: 7px; border-radius: 50%;
@@ -791,6 +761,14 @@
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
         About
       </button>
+      <!-- Exit: closes the app entirely via api.py's exit_app(), which
+           calls window.destroy(). Not a view-switcher like the buttons
+           above, so it's excluded from the .nav-item active-state
+           logic (see switchView()) and styled distinctly below. -->
+      <button class="nav-item nav-item-exit" id="exitAppBtn">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
+        Exit
+      </button>
     </nav>
 
     <div class="sidebar-footer">
@@ -823,18 +801,6 @@
         <div class="subtitle-translation" id="subTranslated">
           این یک <span class="highlight">ترجمهٔ زنده</span> است. شما می‌توانید صحبت کنید و ترجمه را به‌صورت آنی ببینید.
         </div>
-      </div>
-
-      <!-- Select App: captures a chosen open window's live content
-           (~2fps) and shows it as the stage background, so it's
-           visible alongside the caption without a separate always-on-
-           top window — see api.py's list_open_windows/start_app_capture. -->
-      <div class="select-app-wrap">
-        <button class="select-app-btn" id="selectAppBtn" title="Show another app behind the caption">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
-          <span id="selectAppLabel">Select App</span>
-        </button>
-        <div class="lang-dropdown" id="appPickerDropdown"></div>
       </div>
 
       <!-- Shrink to captions: resizes/moves this same window down to
@@ -1096,7 +1062,46 @@
   <section class="page-view hidden" id="aboutPageView">
     <div class="page-view-inner">
       <h1 class="page-title">About</h1>
-      <p class="setting-note">MithraVoice by MithraCorp.</p>
+
+      <div class="section">
+        <p class="setting-note" style="font-size:13px; color:var(--text-secondary); line-height:1.6;">
+          MithraVoice turns spoken words into live, on-screen captions — transcribed and translated in real time, right as someone is speaking. It's built for rooms where people follow along in more than one language at once: presentations, lectures, meetings, and panels.
+        </p>
+      </div>
+
+      <div class="section">
+        <div class="section-title">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+          What it does
+        </div>
+        <p class="setting-note">Speak naturally — no scripts or special pauses needed. Your words appear as text within moments, with the translation displayed right alongside, sized and styled for whoever's reading it rather than just the presenter.</p>
+      </div>
+
+      <div class="section">
+        <div class="section-title">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          Built for the room
+        </div>
+        <p class="setting-note">Show the original and translation together or just one, pin captions to the top/bottom/center to fit your slides, scale the font from a small huddle to the back of a lecture hall, and match your theme with Light, Dark, or Custom appearance.</p>
+      </div>
+
+      <div class="section">
+        <div class="section-title">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 8l6 6 6-6"/><path d="M3 3h18v18H3z" opacity="0"/><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15 15 0 0 1 0 20 15 15 0 0 1 0-20z"/></svg>
+          Languages
+        </div>
+        <p class="setting-note">English and Persian (Farsi), translated live in both directions. More languages are in development.</p>
+      </div>
+
+      <div class="section">
+        <div class="section-title">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+          MithraCorp
+        </div>
+        <p class="setting-note">MithraVoice is built by MithraCorp. Full feature details, pricing, and account plans are at <a href="#" class="about-link" id="aboutSiteLink" style="color:var(--gold);">mithracorp.com/mithravoice.html</a>.</p>
+      </div>
+
+      <p class="setting-note" id="aboutVersion" style="margin-top:20px; opacity:0.6;">MithraVoice</p>
     </div>
   </section>
 
@@ -1118,6 +1123,7 @@
       document.getElementById(v + 'PageView').classList.toggle('hidden', view !== v);
     });
     if (view === 'settings') loadSettingsPage();
+    if (view === 'about') loadAboutPage();
   }
 
   /**
@@ -1127,14 +1133,25 @@
    * switches which page is visible via switchView().
    */
   function setupNav() {
-    document.querySelectorAll('.nav-item').forEach(btn => {
+    document.querySelectorAll('.nav-item[data-view]').forEach(btn => {
       btn.addEventListener('click', () => {
-        document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.nav-item[data-view]').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         switchView(btn.dataset.view);
       });
     });
   }
+
+  /**
+   * Exit button
+   * Usage: closes the app entirely via api.py's exit_app(), which
+   * calls window.destroy(). Deliberately NOT wired up through
+   * setupNav() above — it has no data-view and isn't a page to
+   * switch to, it's a one-way action.
+   */
+  document.getElementById('exitAppBtn').addEventListener('click', () => {
+    callApi('exit_app');
+  });
 
   /**
    * loadSettingsPage()
@@ -1521,8 +1538,26 @@
     }
     this.textContent = 'Deactivating…';
     callApi('deactivate_device', keyCode).then(() => {
-      note.textContent = 'Device deactivated. Restart the app to re-enter a license key.';
       this.textContent = 'Deactivate This Device';
+      this.dataset.keyCode = '';
+      note.textContent = '';
+      // Stop any in-progress session before logging out, rather than
+      // leaving the pipeline running (mic held open, engine warm)
+      // behind the license gate.
+      if (sessionStarted) {
+        callApi('stop_session');
+        sessionStarted = false;
+        listening = false;
+        setListening(false);
+      }
+      // No restart needed: deactivate_device already removed this
+      // device's record from the license server AND deleted the
+      // locally cached token (see licensing.py's deactivate_this_device
+      // and clear_cached_token), so get_cached_license_status() would
+      // report "no_license" from this point on regardless — showing
+      // the gate immediately just reflects that without making the
+      // user quit and relaunch to see it.
+      showLicenseGate('Device deactivated. Enter a license key to continue.');
     });
   });
 
@@ -1633,8 +1668,7 @@
    * unresolved rendering bug on real hardware). Also swaps to the
    * '.compact-mode' layout, which the CSS hides the sidebar, right
    * settings panel, and control bar with — leaving only the stage
-   * (caption + whatever app is currently shown via Select App) and
-   * the Exit button. Current Position/Display mode/Font size are
+   * (caption + scene) and the Exit button. Current Position/Display mode/Font size are
    * passed along so the window is sized/placed to match (theme swap
    * isn't wired up yet anywhere else in the app, so appearance is
    * left as-is).
@@ -1665,118 +1699,6 @@
   }
   document.getElementById('maximizeBtn').addEventListener('click', shrinkToCaptions);
   document.getElementById('exitCompactBtn').addEventListener('click', exitCompactMode);
-
-  /**
-   * populateAppPicker()
-   * Usage: called each time the Select App button is clicked, right
-   * before opening the dropdown. Fetches the current list of open
-   * windows fresh every time (rather than caching), since which apps
-   * are open can change between clicks. Always includes a "None" row
-   * to revert to the default background.
-   */
-  function populateAppPicker() {
-    const dropdown = document.getElementById('appPickerDropdown');
-    dropdown.innerHTML = '<div class="lang-option" id="appPickerLoading">Loading open apps…</div>';
-
-    callApi('list_open_windows').then(result => {
-      dropdown.innerHTML = '';
-
-      const noneRow = document.createElement('div');
-      noneRow.className = 'lang-option';
-      noneRow.textContent = 'None (default background)';
-      noneRow.addEventListener('click', e => {
-        e.stopPropagation();
-        stopAppCapture();
-        closeAllDropdowns();
-      });
-      dropdown.appendChild(noneRow);
-
-      if (!result || !result.supported) {
-        const note = document.createElement('div');
-        note.className = 'lang-option';
-        note.textContent = 'Not available on this platform';
-        dropdown.appendChild(note);
-        return;
-      }
-
-      if (!result.windows.length) {
-        const note = document.createElement('div');
-        note.className = 'lang-option';
-        note.textContent = 'No other open windows found';
-        dropdown.appendChild(note);
-        return;
-      }
-
-      result.windows.forEach(win => {
-        const row = document.createElement('div');
-        row.className = 'lang-option';
-        row.textContent = win.title;
-        row.addEventListener('click', e => {
-          e.stopPropagation();
-          startAppCapture(win.id, win.title);
-          closeAllDropdowns();
-        });
-        dropdown.appendChild(row);
-      });
-    });
-  }
-
-  /**
-   * startAppCapture(windowId, title) / stopAppCapture()
-   * Usage: internal — calls the matching Api method and updates the
-   * Select App button's label/active state and the stage background.
-   * The actual frame data arrives separately via window.updateCapturedFrame,
-   * pushed repeatedly from Python once capture starts.
-   */
-  function startAppCapture(windowId, title) {
-    callApi('start_app_capture', windowId).then(result => {
-      if (result && result.ok) {
-        document.getElementById('selectAppBtn').classList.add('active');
-        document.getElementById('selectAppLabel').textContent = title.length > 18 ? title.slice(0, 18) + '…' : title;
-      }
-    });
-  }
-  function stopAppCapture() {
-    callApi('stop_app_capture').then(() => {
-      document.getElementById('selectAppBtn').classList.remove('active');
-      document.getElementById('selectAppLabel').textContent = 'Select App';
-    });
-  }
-
-  document.getElementById('selectAppBtn').addEventListener('click', e => {
-    e.stopPropagation();
-    const dropdown = document.getElementById('appPickerDropdown');
-    const wasOpen = dropdown.classList.contains('open');
-    closeAllDropdowns();
-    if (!wasOpen) {
-      populateAppPicker();
-      dropdown.classList.add('open');
-    }
-  });
-  document.getElementById('appPickerDropdown').addEventListener('click', e => e.stopPropagation());
-
-  /**
-   * window.updateCapturedFrame(dataUrl) / window.clearCapturedFrame()
-   * Usage: called BY PYTHON. updateCapturedFrame arrives repeatedly
-   * (~2x/sec) once start_app_capture succeeds, each time with a fresh
-   * base64 PNG of the selected window's current content — swaps the
-   * stage's default mountain-scene graphic for an <img> showing that
-   * content, updating just the img's src on each call rather than
-   * rebuilding the DOM every frame. clearCapturedFrame reverts to the
-   * default scene (called by stop_app_capture, or if the captured
-   * window closes on its own).
-   */
-  window.updateCapturedFrame = function (dataUrl) {
-    let img = document.getElementById('capturedFrameImg');
-    if (!img) {
-      document.getElementById('scene').innerHTML = '<img class="captured-frame" id="capturedFrameImg">';
-      img = document.getElementById('capturedFrameImg');
-    }
-    img.src = dataUrl;
-  };
-  window.clearCapturedFrame = function () {
-    renderDefaultScene();
-  };
 
   /**
    * loadMicrophones()
@@ -1876,6 +1798,24 @@
     e.preventDefault();
     callApi('open_external_link', 'https://mithracorp.com/contact.html');
   });
+  document.getElementById('aboutSiteLink').addEventListener('click', e => {
+    e.preventDefault();
+    callApi('open_external_link', 'https://mithracorp.com/mithravoice.html');
+  });
+
+  /**
+   * loadAboutPage()
+   * Usage: called each time the About nav item is opened. Fetches the
+   * real running version from Python rather than hardcoding one here,
+   * so it can't drift out of sync with the VERSION file bundled into
+   * the build.
+   */
+  function loadAboutPage() {
+    callApi('get_app_version').then(result => {
+      const version = (result && result.version) || '';
+      document.getElementById('aboutVersion').textContent = version ? `MithraVoice v${version}` : 'MithraVoice';
+    });
+  }
 
   /**
    * licenseErrorMessage(reason)
@@ -2013,8 +1953,7 @@
   /**
    * renderDefaultScene()
    * Usage: draws the default mountain/sunset SVG into #scene. Called
-   * once on load, and again by window.clearCapturedFrame() to revert
-   * from a captured app's live content back to this default look.
+   * once on load.
    */
   function renderDefaultScene() {
     document.getElementById('scene').innerHTML = `

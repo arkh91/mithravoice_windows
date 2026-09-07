@@ -32,21 +32,90 @@ class DeviceInfo(TypedDict):
     is_default: bool
 
 
+def _resolve_input_devices():
+    """
+    _resolve_input_devices()
+    Usage: internal — shared by list_input_devices() and
+    MicrophoneStream.start() so the UI's displayed default and the
+    device actually recorded from can never disagree. Returns
+    (devices, eligible_indices, default_index): devices is
+    sd.query_devices()'s raw list, eligible_indices is which of those
+    have an input channel, default_index is the OS default among them.
+
+    On Windows, PortAudio enumerates the SAME physical microphone once
+    per audio host API (MME, DirectSound, WASAPI, WDM-KS) — so without
+    filtering, a single headset can show up as three or four separate,
+    confusingly-similar entries. Worse, sd.default.device reflects
+    MME's default, which is frequently a generic "Microsoft Sound
+    Mapper - Input" proxy device rather than whatever physical device
+    Windows' own Sound Settings has actually selected as default.
+    WASAPI's default_input_device doesn't have that problem — it
+    accurately mirrors the OS-level default — so this prefers WASAPI's
+    device list and default when a WASAPI host API is present, falling
+    back to the old behavior (any host API, sd.default.device) on
+    platforms without one (macOS, Linux) or in the rare case a Windows
+    install somehow lacks it.
+    """
+    devices = sd.query_devices()
+    hostapis = sd.query_hostapis()
+
+    wasapi_index = next(
+        (i for i, api in enumerate(hostapis) if "wasapi" in api.get("name", "").lower()),
+        None,
+    )
+
+    if wasapi_index is not None:
+        eligible_indices = [
+            i for i, d in enumerate(devices)
+            if d.get("max_input_channels", 0) > 0 and d.get("hostapi") == wasapi_index
+        ]
+        default_index = hostapis[wasapi_index].get("default_input_device", -1)
+        # PortAudio uses -1 for "no default set" — fall back to the
+        # first eligible WASAPI device rather than showing no default
+        # at all in that edge case.
+        if default_index not in eligible_indices and eligible_indices:
+            default_index = eligible_indices[0]
+    else:
+        eligible_indices = [i for i, d in enumerate(devices) if d.get("max_input_channels", 0) > 0]
+        default_index = sd.default.device[0] if isinstance(sd.default.device, (list, tuple)) else sd.default.device
+
+    return devices, eligible_indices, default_index
+
+
+def get_default_input_device_index() -> Optional[int]:
+    """
+    get_default_input_device_index()
+    Usage: called by MicrophoneStream.start() when no explicit device
+    was chosen (device_index=None — i.e. the user never touched the
+    Settings dropdown), so actual recording resolves to the exact same
+    device list_input_devices() marked "is_default": True for in the
+    UI. Without this, sd.InputStream(device=None) would let PortAudio
+    pick its own default independently, which — per the host-API
+    caveat above — is not guaranteed to be the same device, silently
+    recording from the wrong microphone despite the UI showing the
+    right one. Returns None (letting PortAudio decide) only if no
+    input devices could be found at all.
+    """
+    _, eligible_indices, default_index = _resolve_input_devices()
+    if default_index in eligible_indices:
+        return default_index
+    return eligible_indices[0] if eligible_indices else None
+
+
 def list_input_devices() -> List[DeviceInfo]:
     """
     list_input_devices()
     Usage: call to populate the "Microphone" selector in the settings
     panel. Returns only devices with at least one input channel, each
     flagged with whether it's the OS default so the UI can show
-    "Default Device" as it does today.
+    "Default Device" as it does today. See _resolve_input_devices()
+    above for how "default" is determined.
     """
-    devices = sd.query_devices()
-    default_index = sd.default.device[0] if isinstance(sd.default.device, (list, tuple)) else sd.default.device
-    result: List[DeviceInfo] = []
-    for i, d in enumerate(devices):
-        if d.get("max_input_channels", 0) > 0:
-            result.append({"index": i, "name": d["name"], "is_default": i == default_index})
-    return result
+    devices, eligible_indices, default_index = _resolve_input_devices()
+    return [
+        {"index": i, "name": devices[i]["name"], "is_default": i == default_index}
+        for i in eligible_indices
+    ]
 
 
 class MicrophoneStream:
@@ -120,13 +189,23 @@ class MicrophoneStream:
         Usage: opens the OS audio input stream and begins invoking
         on_chunk. Raises immediately if the chosen device can't be opened
         (e.g. unplugged since the device list was fetched).
+
+        When device_index is None (the user hasn't explicitly chosen
+        one in Settings), resolves to get_default_input_device_index()
+        rather than passing device=None straight to sd.InputStream —
+        otherwise PortAudio would pick its own default independently,
+        which isn't guaranteed to be the same physical device
+        list_input_devices() marked "is_default" for the UI (see that
+        function's docstring), silently recording from the wrong mic
+        despite the UI showing the right one.
         """
+        device = self.device_index if self.device_index is not None else get_default_input_device_index()
         self._stream = sd.InputStream(
             samplerate=SAMPLE_RATE,
             channels=CHANNELS,
             dtype="float32",
             blocksize=BLOCK_SIZE,
-            device=self.device_index,
+            device=device,
             callback=self._callback,
         )
         self._stream.start()
