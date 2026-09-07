@@ -1732,6 +1732,27 @@
       callApi('get_app_settings').then(settings => {
         const engineMode = (settings && settings.engine_mode) || 'auto';
         const micIndex = settings ? settings.microphone_device_index : null;
+        // Usage: shared by both the normal (resolved-but-not-ok) and
+        // the .catch() (rejected, e.g. an uncaught Python exception)
+        // paths below, so a failed session always resets the UI back
+        // to idle and always shows *some* message — previously an
+        // uncaught exception in start_session left the button stuck
+        // showing "Listening" forever with no feedback at all.
+        function revertToIdle(error) {
+          listening = false;
+          sessionStarted = false;
+          setListening(false);
+          const messages = {
+            online_not_in_plan: 'Your plan doesn\u2019t include online translation.',
+            offline_not_in_plan: 'Your plan doesn\u2019t include offline translation.',
+            no_engine_in_plan: 'No translation engine is available on your current plan.',
+            not_licensed: 'Your license isn\u2019t active. Please reactivate.',
+            mic_start_failed: 'Couldn\u2019t open the microphone. Check it in Settings.',
+          };
+          const statusText = document.getElementById('statusText');
+          statusText.textContent = messages[error] || 'Couldn\u2019t start the session.';
+        }
+
         callApi('start_session', from, to, micIndex, engineMode).then(result => {
           // start_session enforces plan-based engine access server-side
           // (see api.py) — if it's rejected (e.g. a plan downgrade
@@ -1739,19 +1760,9 @@
           // plan), revert the UI back to idle rather than showing
           // "Listening" for a session that never actually started.
           if (!result || !result.ok) {
-            listening = false;
-            sessionStarted = false;
-            setListening(false);
-            const messages = {
-              online_not_in_plan: 'Your plan doesn\u2019t include online translation.',
-              offline_not_in_plan: 'Your plan doesn\u2019t include offline translation.',
-              no_engine_in_plan: 'No translation engine is available on your current plan.',
-              not_licensed: 'Your license isn\u2019t active. Please reactivate.',
-            };
-            const statusText = document.getElementById('statusText');
-            statusText.textContent = messages[result && result.error] || 'Couldn\u2019t start the session.';
+            revertToIdle(result && result.error);
           }
-        });
+        }).catch(() => revertToIdle());
       });
       sessionStarted = true;
     } else if (sessionStarted) {

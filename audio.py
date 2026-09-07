@@ -118,6 +118,29 @@ def list_input_devices() -> List[DeviceInfo]:
     ]
 
 
+def _resample_mono(samples: np.ndarray, orig_sr: float) -> np.ndarray:
+    """
+    _resample_mono(samples, orig_sr)
+    Usage: internal — called from MicrophoneStream._callback() only
+    when start() had to open the OS stream at a samplerate other than
+    SAMPLE_RATE because the device rejected SAMPLE_RATE outright (see
+    start()'s docstring). Azure Speech SDK and faster-whisper both
+    require exactly SAMPLE_RATE regardless of what the physical device
+    natively captures at, so every chunk is converted here before
+    on_chunk ever sees it. Plain linear interpolation via np.interp
+    rather than pulling in scipy/resampy as a dependency — this is
+    fine for speech-recognition input (no professional audio-quality
+    bar to clear) and adds zero new packages to the PyInstaller build.
+    """
+    if samples.size == 0:
+        return samples
+    duration = samples.shape[0] / orig_sr
+    target_len = max(1, round(duration * SAMPLE_RATE))
+    orig_positions = np.linspace(0, duration, num=samples.shape[0], endpoint=False)
+    target_positions = np.linspace(0, duration, num=target_len, endpoint=False)
+    return np.interp(target_positions, orig_positions, samples).astype(np.float32)
+
+
 class MicrophoneStream:
     """
     MicrophoneStream(device_index, on_chunk, on_level)
@@ -146,6 +169,13 @@ class MicrophoneStream:
         self.paused = threading.Event()
         self._stream: Optional[sd.InputStream] = None
         self._error_queue: "queue.Queue[Exception]" = queue.Queue()
+        # The channel count / samplerate the OS stream was ACTUALLY
+        # opened with (set in start(), read in _callback() to decide
+        # whether to downmix/resample). Both equal the ideal
+        # CHANNELS/SAMPLE_RATE until start() runs; see start()'s
+        # docstring for why a given device might force something else.
+        self._open_channels = CHANNELS
+        self._open_samplerate: float = SAMPLE_RATE
 
     def _callback(self, indata, frames, time_info, status):
         """
@@ -160,13 +190,28 @@ class MicrophoneStream:
             # Non-fatal glitches (e.g. buffer overrun) surface here; log rather than raise.
             pass
 
+        # Usage: internal — collapses a possibly-multichannel buffer down
+        # to a single mono column, then, if the device also refused
+        # SAMPLE_RATE itself, resamples up/down to it. Some WASAPI
+        # endpoints (notably wireless/USB headset dongles like the
+        # SteelSeries Arctis 7P) reject being opened with anything
+        # other than their own reported channel count and/or native
+        # samplerate — see start()'s docstring for the fallback logic
+        # that negotiates a format the device will actually accept.
+        # Whatever combination start() ended up with, on_chunk/on_level
+        # always still receive plain mono audio at SAMPLE_RATE, exactly
+        # as if the device had supported the ideal format directly.
+        mono = indata[:, 0] if self._open_channels == 1 else indata.mean(axis=1)
+        mono = mono.astype(np.float32)
+        if self._open_samplerate != SAMPLE_RATE:
+            mono = _resample_mono(mono, self._open_samplerate)
+
         if self.on_level is not None:
             try:
                 if self.paused.is_set():
                     self.on_level(0.0)
                 else:
-                    samples = indata[:, 0].astype(np.float32)
-                    rms = float(np.sqrt(np.mean(samples**2))) if samples.size else 0.0
+                    rms = float(np.sqrt(np.mean(mono**2))) if mono.size else 0.0
                     # Typical speech RMS in float32 [-1, 1] is small (quiet
                     # room tone to normal speaking voice rarely exceeds
                     # ~0.15-0.2), so scale up empirically for a meter that
@@ -177,7 +222,7 @@ class MicrophoneStream:
 
         if self.paused.is_set():
             return
-        pcm16 = (indata[:, 0] * 32767).astype(np.int16).tobytes()
+        pcm16 = (mono * 32767).astype(np.int16).tobytes()
         try:
             self.on_chunk(pcm16)
         except Exception as exc:  # keep the audio thread alive; surface the error to the caller
@@ -187,8 +232,9 @@ class MicrophoneStream:
         """
         start()
         Usage: opens the OS audio input stream and begins invoking
-        on_chunk. Raises immediately if the chosen device can't be opened
-        (e.g. unplugged since the device list was fetched).
+        on_chunk. Raises the last PortAudioError encountered if no
+        format the device accepts could be found (e.g. unplugged since
+        the device list was fetched).
 
         When device_index is None (the user hasn't explicitly chosen
         one in Settings), resolves to get_default_input_device_index()
@@ -198,17 +244,65 @@ class MicrophoneStream:
         list_input_devices() marked "is_default" for the UI (see that
         function's docstring), silently recording from the wrong mic
         despite the UI showing the right one.
+
+        Tries (SAMPLE_RATE, CHANNELS) first, since that's the ideal
+        format every normal device accepts and needs no downmixing or
+        resampling. Some WASAPI endpoints — seen in practice on
+        wireless/USB headset dongles such as the SteelSeries Arctis
+        7P — reject that outright: either the channel count
+        (PortAudioError -9998, "Invalid number of channels") or the
+        samplerate itself (-9997, "Invalid sample rate"), sometimes
+        both. Rather than special-casing either error individually,
+        this walks a list of candidate (samplerate, channels) pairs
+        that each concede one more thing to the device's own reported
+        native format, stopping at the first one PortAudio accepts.
+        _callback() then downmixes/resamples using self._open_channels
+        / self._open_samplerate so on_chunk and on_level always still
+        see plain mono audio at SAMPLE_RATE, regardless of which
+        format the stream actually had to open in.
         """
         device = self.device_index if self.device_index is not None else get_default_input_device_index()
-        self._stream = sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=CHANNELS,
-            dtype="float32",
-            blocksize=BLOCK_SIZE,
-            device=device,
-            callback=self._callback,
-        )
-        self._stream.start()
+        device_info = sd.query_devices(device)
+        device_channels = max(1, int(device_info.get("max_input_channels", CHANNELS)))
+        device_samplerate = float(device_info.get("default_samplerate", SAMPLE_RATE)) or SAMPLE_RATE
+
+        candidates = [
+            (SAMPLE_RATE, CHANNELS),
+            (SAMPLE_RATE, device_channels),
+            (device_samplerate, CHANNELS),
+            (device_samplerate, device_channels),
+        ]
+        # De-duplicate while preserving preference order (e.g. when
+        # device_channels == CHANNELS, several entries above collapse
+        # to the same pair — no need to try opening it twice).
+        seen: set = set()
+        unique_candidates = [c for c in candidates if not (c in seen or seen.add(c))]
+
+        last_exc: Optional[Exception] = None
+        for samplerate, channels in unique_candidates:
+            # Scale blocksize to whatever samplerate we're attempting so
+            # every candidate still delivers ~100ms chunks (BLOCK_SIZE's
+            # original intent) rather than silently drifting shorter or
+            # longer as the samplerate changes across candidates.
+            blocksize = max(1, round(BLOCK_SIZE * samplerate / SAMPLE_RATE))
+            try:
+                self._stream = sd.InputStream(
+                    samplerate=samplerate,
+                    channels=channels,
+                    dtype="float32",
+                    blocksize=blocksize,
+                    device=device,
+                    callback=self._callback,
+                )
+            except sd.PortAudioError as exc:
+                last_exc = exc
+                continue
+            self._open_channels = channels
+            self._open_samplerate = samplerate
+            self._stream.start()
+            return
+
+        raise last_exc
 
     def stop(self) -> None:
         """

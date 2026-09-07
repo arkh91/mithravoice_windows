@@ -21,6 +21,7 @@ import functools
 import json
 import threading
 import time
+import traceback
 import webbrowser
 from typing import Optional
 from urllib.parse import urlencode
@@ -117,6 +118,22 @@ TRANSLATION_TRANSPARENT = True
 # Nothing in translation.html may paint this colour.
 TRANSLATION_KEY_COLOR = (1, 2, 3)
 TRANSLATION_KEY_COLOR_HEX = "#010203"
+
+# Keep the strip above every other window while it is open, so the
+# captions stay readable over whatever is being presented.
+#
+# Setting HWND_TOPMOST once is not enough on its own. Topmost is a
+# z-order among topmost windows, not a lock: another application that
+# raises itself the same way — a PowerPoint slideshow, a video player,
+# a media overlay — lands above this one and stays there. So the
+# position is re-asserted on a timer for as long as the window is
+# open. See Api._start_topmost_watchdog().
+TRANSLATION_ALWAYS_ON_TOP = True
+
+# How often to re-assert it. Short enough that being covered is a
+# blink rather than a dead spot in the captions, long enough to be
+# nothing on a CPU: this is one SetWindowPos call per tick.
+TRANSLATION_TOPMOST_INTERVAL_SECONDS = 2.0
 
 def _display_scale() -> float:
     """
@@ -325,6 +342,45 @@ def _bottom_strip_geometry(window):
 # keeps whatever geometry create_window gave it, exactly as before.
 
 
+def _reassert_topmost(hwnd) -> bool:
+    """
+    _reassert_topmost(hwnd)
+    Usage: called on a timer by Api._start_topmost_watchdog(). Pushes
+    the window back to the top of the topmost band without moving,
+    resizing or focusing it. Returns False once the window no longer
+    exists, which is the watchdog's signal to stop.
+
+    IsWindow is checked first because the window can be destroyed
+    between two ticks; calling SetWindowPos on a dead handle is at
+    best a no-op and at worst hits a handle Windows has already
+    recycled for something else.
+
+    SWP_NOMOVE | SWP_NOSIZE means the x/y/width/height arguments are
+    ignored, so this cannot fight the exact placement done earlier.
+    SWP_NOACTIVATE means it cannot steal focus from whatever the user
+    is typing in — without it this would yank the caret out of their
+    spreadsheet every couple of seconds.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    user32.IsWindow.argtypes = [wintypes.HWND]
+    user32.IsWindow.restype = wintypes.BOOL
+
+    if not user32.IsWindow(hwnd):
+        return False
+
+    SWP_NOSIZE = 0x0001
+    SWP_NOMOVE = 0x0002
+    SWP_NOACTIVATE = 0x0010
+    HWND_TOPMOST = -1
+
+    user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+    return True
+
+
 def _paint_form_background(window, rgb) -> bool:
     """
     _paint_form_background(window, rgb)
@@ -444,14 +500,15 @@ def _apply_color_key(hwnd) -> bool:
     return ok
 
 
-def _force_window_rect(title: str, x: int, y: int, width: int, height: int) -> bool:
+def _force_window_rect(title: str, x: int, y: int, width: int, height: int):
     """
     _force_window_rect(title, x, y, width, height)
     Usage: called from Api._apply_translation_geometry() once the
     Translation window has loaded. Moves and resizes the window titled
     `title` belonging to THIS process to exactly the given screen
-    pixels, and logs where it actually landed. Returns True if the
-    window was found and positioned.
+    pixels, and logs where it actually landed. Returns the window
+    handle if it was found and positioned, otherwise None — the
+    handle is what the caller needs to keep re-asserting topmost.
 
     Matching is by title AND process id: FindWindow on a title as
     generic as "Translation" could just as easily grab an unrelated
@@ -509,7 +566,7 @@ def _force_window_rect(title: str, x: int, y: int, width: int, height: int) -> b
 
     if not found:
         print(f"[TRANSLATION] no window titled {title!r} owned by this process; leaving geometry alone", flush=True)
-        return False
+        return None
 
     hwnd = found[0]
 
@@ -523,12 +580,20 @@ def _force_window_rect(title: str, x: int, y: int, width: int, height: int) -> b
         # match.
         _apply_color_key(hwnd)
 
-    SWP_NOZORDER = 0x0004
     SWP_SHOWWINDOW = 0x0040
     SWP_FRAMECHANGED = 0x0020
+    SWP_NOACTIVATE = 0x0010
+    HWND_TOPMOST = -1
+    HWND_NOTOPMOST = -2
+
+    # SWP_NOACTIVATE matters as much as the topmost flag here. Without
+    # it, placing the window steals keyboard focus from whatever the
+    # user is typing in — which for a caption strip that appears over
+    # someone's spreadsheet would be worse than being hidden.
+    insert_after = HWND_TOPMOST if TRANSLATION_ALWAYS_ON_TOP else HWND_NOTOPMOST
     user32.SetWindowPos(
-        hwnd, None, x, y, width, height,
-        SWP_NOZORDER | SWP_SHOWWINDOW | SWP_FRAMECHANGED,
+        hwnd, insert_after, x, y, width, height,
+        SWP_SHOWWINDOW | SWP_FRAMECHANGED | SWP_NOACTIVATE,
     )
 
     after = wintypes.RECT()
@@ -537,10 +602,11 @@ def _force_window_rect(title: str, x: int, y: int, width: int, height: int) -> b
     print(
         f"[TRANSLATION] placement: was ({before.left},{before.top})-({before.right},{before.bottom}) "
         f"-> now ({after.left},{after.top})-({after.right},{after.bottom}) "
-        f"[wanted ({x},{y}) {width}x{height}]",
+        f"[wanted ({x},{y}) {width}x{height}]"
+        + (", topmost" if TRANSLATION_ALWAYS_ON_TOP else ""),
         flush=True,
     )
-    return True
+    return hwnd
 
 
 def _log_click(func):
@@ -589,6 +655,10 @@ class Api:
         # can compare it against what the window actually became, and
         # correct it. None until the first open.
         self._target_translation_geometry: Optional[tuple] = None
+        # Signals the always-on-top watchdog thread to stop. Set when
+        # the Translation window closes; None whenever no watchdog is
+        # running. See _start_topmost_watchdog().
+        self._translation_topmost_stop: Optional[threading.Event] = None
         self._capture_stream = None
         self._logged_first_push = False
         self._logged_no_window_warning = False
@@ -913,8 +983,34 @@ class Api:
                 return {"ok": False, "error": "no_engine_in_plan"}
             # else: both allowed, "auto" proceeds as normal (try online, fall back to offline)
 
+        # device_index comes from settings persisted in an earlier
+        # session. PortAudio/Windows device indices are NOT stable
+        # across restarts — installing/enabling any new audio device
+        # (a virtual speaker, a new headset, etc.) can silently
+        # renumber every existing device, so an index saved last
+        # session can now point at something else entirely, including
+        # an output-only device. Re-validate it against the CURRENT
+        # device list rather than trusting it blindly: if it no longer
+        # names an input-capable device, fall back to the OS default
+        # (None) instead of handing a wrong/invalid device straight to
+        # sd.InputStream, where it would raise PortAudioError deep
+        # inside the audio callback thread.
+        if device_index is not None:
+            current_devices = list_input_devices()
+            if not any(d["index"] == device_index for d in current_devices):
+                device_index = None
+
         self._current_from_lang, self._current_to_lang = from_lang, to_lang
-        self._pipeline.start(from_lang, to_lang, device_index, mode)  # type: ignore[arg-type]
+        try:
+            self._pipeline.start(from_lang, to_lang, device_index, mode)  # type: ignore[arg-type]
+        except Exception as exc:  # noqa: BLE001 - any mic/engine start failure must surface to the UI, never crash the bridge call
+            # Print the full traceback to the console the app was
+            # launched from — the UI only ever shows a short generic
+            # message (see index.html's mic_start_failed), so this is
+            # the only place the real cause (which device, which
+            # PortAudio error code, etc.) is visible for debugging.
+            traceback.print_exc()
+            return {"ok": False, "error": "mic_start_failed", "detail": str(exc)}
         return {"ok": True}
 
     @_log_click
@@ -1253,7 +1349,10 @@ class Api:
         def _place():
             for _ in range(10):
                 try:
-                    if _force_window_rect("Translation", x, y, width, height):
+                    hwnd = _force_window_rect("Translation", x, y, width, height)
+                    if hwnd:
+                        if TRANSLATION_ALWAYS_ON_TOP:
+                            self._start_topmost_watchdog(hwnd)
                         return
                 except Exception as exc:  # noqa: BLE001 - placement is cosmetic; never take the app down for it
                     print(f"[TRANSLATION] placement failed: {exc!r}", flush=True)
@@ -1262,6 +1361,66 @@ class Api:
             print("[TRANSLATION] gave up looking for the window to place", flush=True)
 
         threading.Thread(target=_place, daemon=True).start()
+
+    def _start_topmost_watchdog(self, hwnd):
+        """
+        _start_topmost_watchdog(hwnd)
+        Usage: internal — started once per open, from the placement
+        thread, after the window has been found. Keeps the Translation
+        strip above every other window for as long as it is open.
+
+        A one-off HWND_TOPMOST is not enough. Topmost is a z-order
+        band, not a lock: any other application that raises itself the
+        same way — a PowerPoint slideshow, a video player, a media
+        overlay — sits above this window and stays there, and the
+        captions are silently lost behind it. Re-asserting on a timer
+        means being covered lasts a tick instead of the rest of the
+        talk.
+
+        Stops on whichever comes first: the stop Event being set by
+        _on_translation_closed(), or _reassert_topmost() reporting the
+        window no longer exists. The second is the backstop for any
+        path that destroys the window without firing `closed`, so a
+        thread can't outlive its window.
+
+        Any previous watchdog is stopped first. Without that, opening
+        and closing the strip repeatedly would leave a thread per open
+        all poking at stale handles.
+        """
+        self._stop_topmost_watchdog()
+
+        stop = threading.Event()
+        self._translation_topmost_stop = stop
+
+        def _watch():
+            # Event.wait() rather than sleep() so closing the window
+            # ends the thread immediately instead of after up to a
+            # full interval.
+            while not stop.wait(TRANSLATION_TOPMOST_INTERVAL_SECONDS):
+                try:
+                    if not _reassert_topmost(hwnd):
+                        return
+                except Exception as exc:  # noqa: BLE001 - never take the app down over z-order
+                    print(f"[TRANSLATION] topmost watchdog stopping: {exc!r}", flush=True)
+                    return
+
+        threading.Thread(target=_watch, daemon=True).start()
+        print(
+            f"[TRANSLATION] holding on top, re-asserted every "
+            f"{TRANSLATION_TOPMOST_INTERVAL_SECONDS:g}s",
+            flush=True,
+        )
+
+    def _stop_topmost_watchdog(self):
+        """
+        _stop_topmost_watchdog()
+        Usage: internal — ends the always-on-top thread if one is
+        running. Called when the Translation window closes and before
+        starting a new watchdog. Safe to call when none is running.
+        """
+        if self._translation_topmost_stop is not None:
+            self._translation_topmost_stop.set()
+            self._translation_topmost_stop = None
 
     def _push_to_translation_window(self, script: str) -> None:
         """
@@ -1310,6 +1469,7 @@ class Api:
         handle in place means it would keep pushing captions at a
         destroyed window for that whole window.
         """
+        self._stop_topmost_watchdog()
         self._translation_window = None
         if self._window is not None:
             self._window.restore()
