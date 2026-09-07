@@ -17,10 +17,8 @@ Usage:
     webview.start()
 """
 
-import ctypes
 import functools
 import json
-import sys
 import threading
 import time
 import webbrowser
@@ -78,10 +76,18 @@ class Api:
 
     def __init__(self) -> None:
         self._window = None
-        # (x, y, width, height) captured right before shrink_to_captions()
-        # resizes/moves the window down to a small caption bar, so
-        # restore_full_size() can put it back exactly where it was.
-        self._pre_shrink_geometry = None
+        # The second, full-screen captions window opened by the stage's
+        # "Full Screen" button (translation.html — see
+        # open_translation_window). None whenever it isn't open, which
+        # is also the "is it open?" check everywhere below; only one
+        # can exist at a time.
+        self._translation_window = None
+        # The most recent window.updateSubtitle(...) script string
+        # pushed to the main window, replayed into the Translation
+        # window as soon as it finishes loading so it opens already in
+        # sync instead of showing "Waiting for speech…" until the next
+        # result arrives. None until the first result of this run.
+        self._last_subtitle: Optional[str] = None
         self._capture_stream = None
         self._logged_first_push = False
         self._logged_no_window_warning = False
@@ -134,6 +140,12 @@ class Api:
         speech as a JS string literal. Also logs finalized (not interim)
         results to local history, unless the user has set history
         retention to "none".
+
+        Mirrors the identical call into the Translation window whenever
+        that's open (see open_translation_window). translation.html
+        defines the same window.updateSubtitle hook index.html does
+        precisely so this stays one script string sent to two windows,
+        rather than two divergent formatting paths that could drift.
         """
         if result.is_final:
             retention = load_settings().get("history_retention", "30_days")
@@ -144,8 +156,10 @@ class Api:
         translated = json.dumps(result.translated_text)
         is_final = "true" if result.is_final else "false"
         script = f"window.updateSubtitle({original}, {translated}, {is_final})"
+        self._last_subtitle = script
         if self._window is not None:
             self._window.evaluate_js(script)
+        self._push_to_translation_window(script)
 
     def _push_engine_change(self, mode: str) -> None:
         """
@@ -521,95 +535,127 @@ class Api:
         return {"version": get_current_version()}
 
     @_log_click
-    def shrink_to_captions(self, overlay_settings: Optional[dict] = None):
+    def open_translation_window(self, view_settings: Optional[dict] = None):
         """
-        shrink_to_captions(overlay_settings=None)
-        Usage (JS): window.pywebview.api.shrink_to_captions({position, displayMode, fontSize})
-        Replaces the old minimize_window() + open_caption_overlay()
-        flow, which opened a SECOND native WebView2 window to act as
-        an always-on-top captions overlay while the main window sat
-        minimized in the taskbar. That approach hit a confirmed,
-        persistent rendering bug on a real Windows machine: the second
-        window would report itself as created, shown, correctly
-        positioned, and topmost via every pywebview/Win32 API checked,
-        yet still not actually paint on screen in most tests — flaky
-        in a way that resisted several rounds of fixes (a topmost
-        z-order bug, an event-registration race, a maximize/restore
-        workaround, a DPI-scale mismatch) without ever becoming fully
-        reliable.
-        This sidesteps that whole class of bug by never creating a
-        second window at all: it resizes and moves THIS window down
-        to a small caption-bar size/position, and index.html's own JS
-        (see shrinkToCaptions() there) swaps to a caption-only layout
-        via the '.compact-mode' CSS class (hiding the sidebar,
-        settings panel, and control bar). Bound to the stage's
-        bottom-right button (id="maximizeBtn" in index.html).
-        Captions keep updating exactly as before via the same
-        _push_result() -> evaluate_js() path — there's no second DOM
-        to keep in sync, so none of the old "replay the last caption
-        when the overlay opens" logic is needed anymore either.
-        No-ops quietly if called before attach_window() has run.
+        open_translation_window(view_settings=None)
+        Usage (JS): window.pywebview.api.open_translation_window({position, appearance, textColor, fontSize, displayMode})
+        Bound to the stage's bottom-right "Full Screen" button
+        (id="maximizeBtn" in index.html). Does two things, in this
+        order:
+          1. opens a second, full-screen window titled "Translation"
+             (translation.html) that shows nothing but the live
+             captions, mirrored from the same _push_result() that
+             feeds the main stage;
+          2. minimizes the main window down to the OS taskbar, so the
+             control UI is out of the way while that full-screen
+             caption display is up.
+
+        Order matters: the new window is created BEFORE the main one
+        is minimized. Minimizing first tends to hand focus to whatever
+        was behind the app, and the new window can then open behind
+        that instead of coming up front — which reads as "the button
+        did nothing but minimize."
+
+        view_settings mirrors whatever Caption Style / Display / Text
+        Color is currently active on the main stage and is passed
+        through as query-string params, so the full-screen window opens
+        matching rather than resetting to defaults (see
+        translation.html's applyStyleFromParams()).
+
+        No-ops on the create step if a Translation window is already
+        open — only one at a time. No-ops entirely if called before
+        attach_window() has run.
         """
         if self._window is None:
-            return
-        self._pre_shrink_geometry = (
-            self._window.x, self._window.y, self._window.width, self._window.height,
-        )
-        overlay_settings = overlay_settings or {}
-        position = overlay_settings.get("position", "bottom")
+            return {"ok": False, "error": "no_window"}
 
-        screen = self._find_main_window_monitor()
-        if screen is None:
-            screen = self._screen_for_point((self._window.x, self._window.y))
+        if self._translation_window is None:
+            view_settings = view_settings or {}
+            query = urlencode({
+                "position": view_settings.get("position", "bottom"),
+                "appearance": view_settings.get("appearance", "dark"),
+                "textColor": view_settings.get("textColor", "white"),
+                "fontSize": view_settings.get("fontSize", 24),
+                "displayMode": view_settings.get("displayMode", "both"),
+            })
+            self._translation_window = webview.create_window(
+                "Translation",
+                f"translation.html?{query}",
+                js_api=self,
+                width=1280,
+                height=720,
+                fullscreen=True,
+                background_color="#0b0e14",
+            )
+            self._translation_window.events.closed += self._on_translation_closed
+            self._translation_window.events.loaded += self._push_last_subtitle_to_translation
 
-        if screen is not None:
-            third = screen.height // 3
-            if position == "top":
-                x, y, width, height = screen.x, screen.y, screen.width, third
-            elif position == "center":
-                # A true centered box (60% of screen width, one third
-                # of screen height) rather than a full-width strip —
-                # matches "in the middle of the page" rather than just
-                # vertically-middle.
-                width = int(screen.width * 0.6)
-                height = third
-                x = screen.x + (screen.width - width) // 2
-                y = screen.y + (screen.height - height) // 2
-            else:  # "bottom" (and default)
-                x, y, width, height = screen.x, screen.y + screen.height - third, screen.width, third
-        else:
-            # No screen info available for some reason — still shrink
-            # the window, just without repositioning it.
-            x = y = None
-            width, height = 560, 200
+        self._window.minimize()
+        return {"ok": True}
 
-        print(
-            f"[SHRINK] chosen_screen={screen} -> geometry x={x} y={y} "
-            f"width={width} height={height}",
-            flush=True,
-        )
-        self._window.resize(width, height)
-        if x is not None and y is not None:
-            self._window.move(x, y)
-
-    @_log_click
-    def restore_full_size(self):
+    def _push_to_translation_window(self, script: str) -> None:
         """
-        restore_full_size()
-        Usage (JS): window.pywebview.api.restore_full_size()
-        Undoes shrink_to_captions() above: resizes/moves this window
-        back to exactly where and how big it was before shrinking.
-        Bound to the Exit button that appears while '.compact-mode' is
-        on #app (id="exitCompactBtn" in index.html), which is also
-        responsible for removing that CSS class so the full UI
-        reappears. No-ops quietly if called before a shrink happened.
+        _push_to_translation_window(script)
+        Usage: internal — sends a JS string to the Translation window
+        if one is open, swallowing the error if it isn't. The guard is
+        not just a None check: this is called from _push_result() on a
+        background engine thread, so the window can be destroyed by the
+        user in between the check and the call, which surfaces as an
+        exception from evaluate_js on a dead window. A caption update
+        is never worth taking down the audio pipeline for.
         """
-        if self._window is None or self._pre_shrink_geometry is None:
+        window = self._translation_window
+        if window is None:
             return
-        x, y, width, height = self._pre_shrink_geometry
-        self._window.resize(width, height)
-        self._window.move(x, y)
-        self._pre_shrink_geometry = None
+        try:
+            window.evaluate_js(script)
+        except Exception as exc:  # noqa: BLE001 - window closed mid-push; nothing to recover
+            print(f"[TRANSLATION] push failed (window likely closed): {exc!r}", flush=True)
+
+    def _push_last_subtitle_to_translation(self):
+        """
+        _push_last_subtitle_to_translation()
+        Usage: internal — bound to the Translation window's `loaded`
+        event (fires once its DOM/JS is ready), not called directly.
+        Replays whatever was last shown on the main stage so the
+        full-screen window opens already in sync instead of sitting on
+        its "Waiting for speech…" placeholder until the next live
+        result comes in. No-ops if nothing has been said yet this run.
+        """
+        if self._last_subtitle is not None:
+            self._push_to_translation_window(self._last_subtitle)
+
+    def _on_translation_closed(self):
+        """
+        _on_translation_closed()
+        Usage: internal — bound to the Translation window's `closed`
+        event, so the main window comes back no matter how that window
+        went away: its own X button and the Esc key (both via
+        close_translation_window below) and the OS window chrome all
+        end up here.
+
+        Clearing _translation_window first matters: restore() below can
+        block briefly on some backends, and _push_result() is still
+        running on the engine thread throughout — leaving a stale
+        handle in place means it would keep pushing captions at a
+        destroyed window for that whole window.
+        """
+        self._translation_window = None
+        if self._window is not None:
+            self._window.restore()
+
+    def close_translation_window(self):
+        """
+        close_translation_window()
+        Usage (JS, from translation.html): window.pywebview.api.close_translation_window()
+        Closes the full-screen Translation window. Doesn't restore the
+        main window itself — destroy() fires the window's `closed`
+        event, and _on_translation_closed above is what does the
+        restoring, so every dismissal path ends up in exactly one place.
+        """
+        if self._translation_window is not None:
+            self._translation_window.destroy()
+        return {"ok": True}
 
     @_log_click
     def exit_app(self):
@@ -620,104 +666,26 @@ class Api:
         (id="exitAppBtn" in index.html), below About. Flushes any
         accumulated online usage first, best-effort, so quitting mid-
         session doesn't lose more than the periodic flush interval
-        would have anyway. destroy() closes just this window; since
-        main.py only ever creates the one (master) window, that's
-        enough to end webview.start()'s event loop and let the process
-        exit normally afterward.
+        would have anyway.
+
+        destroy() closes one window at a time, and webview.start()'s
+        event loop only ends once EVERY window is gone — so the
+        Translation window (if the "Full Screen" button opened one)
+        has to be closed too, or Exit would minimize/close the main
+        window while leaving a full-screen caption display stranded on
+        the user's screen with no UI left to dismiss it. It's closed
+        first so _on_translation_closed's restore() lands on a window
+        that still exists.
         """
         try:
             self._flush_online_usage()
         except Exception:
             pass  # never block quitting the app over a usage-reporting hiccup
+        if self._translation_window is not None:
+            self._translation_window.destroy()
+            self._translation_window = None
         if self._window is not None:
             self._window.destroy()
-
-    def _find_main_window_monitor(self):
-        """
-        _find_main_window_monitor()
-        Usage: internal — Windows-only. Asks Windows directly, via the
-        Win32 API (MonitorFromWindow + GetMonitorInfo), which physical
-        monitor the "MithraVoice — Live Translation" window's title
-        bar is actually on right now, then matches that against
-        webview.screens() by nearest starting X coordinate to return
-        one of its entries.
-
-        This replaced comparing self._window.x/self._window.y against
-        webview.screens() bounds directly, which had two real
-        problems on a multi-monitor machine: (1) once the main window
-        is minimized, Windows reports its position as an off-screen
-        sentinel value (e.g. -32000, -32000), which made that lookup
-        pick the wrong monitor entirely, and (2) mixed-DPI monitors
-        don't always report x/y in coordinate spaces that line up
-        cleanly for a simple containment check. MonitorFromWindow
-        instead asks Windows for the actual monitor a window handle
-        is on — this works correctly even while minimized, since
-        Windows still tracks a minimized window's last on-screen
-        placement internally.
-
-        Returns None (falls back to screens()[0]) on any non-Windows
-        OS, if the window can't be found, or on any Win32-call
-        failure — never raises.
-        """
-        if sys.platform != "win32":
-            return None
-        try:
-            user32 = ctypes.windll.user32
-            hwnd = user32.FindWindowW(None, "MithraVoice \u2014 Live Translation")
-            if not hwnd:
-                return None
-            MONITOR_DEFAULTTONEAREST = 2
-            hmonitor = user32.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
-
-            class _RECT(ctypes.Structure):
-                _fields_ = [
-                    ("left", ctypes.c_long), ("top", ctypes.c_long),
-                    ("right", ctypes.c_long), ("bottom", ctypes.c_long),
-                ]
-
-            class _MONITORINFO(ctypes.Structure):
-                _fields_ = [
-                    ("cbSize", ctypes.c_ulong), ("rcMonitor", _RECT),
-                    ("rcWork", _RECT), ("dwFlags", ctypes.c_ulong),
-                ]
-
-            info = _MONITORINFO()
-            info.cbSize = ctypes.sizeof(_MONITORINFO)
-            if not user32.GetMonitorInfoW(hmonitor, ctypes.byref(info)):
-                return None
-            monitor_x = info.rcMonitor.left
-
-            screens = webview.screens
-            if not screens:
-                return None
-            # Nearest starting X, not exact equality — sidesteps small
-            # scale-correction differences between the raw Win32
-            # monitor rect and webview.screens()'s own values on
-            # mixed-DPI setups; monitors are laid out left-to-right,
-            # so "closest" reliably means "same one" in practice.
-            return min(screens, key=lambda s: abs(s.x - monitor_x))
-        except Exception as e:
-            print(f"[OVERLAY] Win32 monitor lookup failed: {e!r}", flush=True)
-            return None
-
-    def _screen_for_point(self, point):
-        """
-        _screen_for_point((x, y))
-        Usage: internal — fallback for _find_main_window_monitor()
-        above (non-Windows OSes, or if that Win32 lookup fails).
-        Picks the webview.screens() entry whose bounds actually
-        contain the given point, falling back to the first available
-        screen (or None) if that lookup comes up empty.
-        """
-        screens = webview.screens
-        if not screens:
-            return None
-        if point is not None:
-            x, y = point
-            for screen in screens:
-                if screen.x <= x < screen.x + screen.width and screen.y <= y < screen.y + screen.height:
-                    return screen
-        return screens[0]
 
     @_log_click
     def open_external_link(self, url: str):

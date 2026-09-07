@@ -231,35 +231,6 @@
   .maximize-btn:hover { border-color: var(--gold); color: var(--gold); }
   .maximize-btn.hidden { display: none; }
 
-  .exit-compact-btn {
-    position: absolute;
-    top: 18px;
-    right: 18px;
-    display: flex; align-items: center; gap: 6px;
-    background: rgba(10,13,20,0.55);
-    backdrop-filter: blur(6px);
-    border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 999px;
-    padding: 8px 16px;
-    color: var(--text-primary);
-    font-size: 12.5px;
-    font-family: var(--font-body);
-    cursor: pointer;
-    z-index: 5;
-  }
-  .exit-compact-btn:hover { border-color: var(--gold); color: var(--gold); }
-  .exit-compact-btn.hidden { display: none; }
-
-  /* Compact/maximized mode: sidebar, right settings panel, and the
-     mic/pause control bar are all hidden — only the stage (scene +
-     caption, using whatever Display/Position/Style/Appearance/Font
-     settings were already set) and the Exit button remain. Exiting
-     restores the normal three-column layout exactly as it was. */
-  #app.compact-mode { grid-template-columns: 1fr; }
-  #app.compact-mode .sidebar { display: none; }
-  #app.compact-mode #liveSettingsPanel { display: none; }
-  #app.compact-mode .control-bar { display: none; }
-
   .dot {
     width: 7px; height: 7px; border-radius: 50%;
     background: var(--green-live);
@@ -884,19 +855,15 @@
         </div>
       </div>
 
-      <!-- Shrink to captions: resizes/moves this same window down to
-           a small caption bar via api.py's shrink_to_captions() —
-           this window is never actually minimized to the taskbar or
-           replaced by a second window; '.compact-mode' just hides
-           everything except the stage. (Still uses the .maximize-btn
-           CSS class/positioning — only the behavior and label
-           changed.) -->
-      <button class="maximize-btn" id="maximizeBtn" title="Shrink to captions">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
-      </button>
-      <button class="exit-compact-btn hidden" id="exitCompactBtn" title="Exit captions view">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
-        Exit
+      <!-- Full Screen: opens the separate full-screen "Translation"
+           window (translation.html) mirroring the live captions, and
+           minimizes this window down to the OS taskbar so the control
+           UI is out of the way behind it. Both happen in one call —
+           see api.py's open_translation_window(). Closing the
+           Translation window (its X, Esc, or the OS chrome) restores
+           this one. -->
+      <button class="maximize-btn" id="maximizeBtn" title="Full Screen — show captions on a full-screen Translation window">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
       </button>
     </div>
 
@@ -1365,13 +1332,10 @@
   }
 
   /**
-   * Shrink-relevant live state
-   * Usage: mirrors whatever Position/Display mode/Font size is
-   * currently active in the settings panel (defaults match the
+   * Live display state
+   * Usage: mirrors whatever Position/Display mode/Font size/Appearance
+   * is currently active in the settings panel (defaults match the
    * "active" buttons and fontSlider value in the HTML markup below).
-   * Read by shrinkToCaptions() and forwarded to api.py's
-   * shrink_to_captions() so the shrunk caption-bar window is
-   * sized/placed to match.
    */
   let currentPosition = 'bottom';
   let currentDisplayMode = 'both';
@@ -1800,48 +1764,38 @@
   setListening(false); // app opens idle; user starts the session with the mic button
 
   /**
-   * shrinkToCaptions()
-   * Usage: bound to the stage's bottom-right button (id="maximizeBtn").
-   * Calls api.py's shrink_to_captions(), which resizes/moves THIS
-   * window down to a small caption-bar size/position (replacing the
-   * old minimize_window()+open_caption_overlay() flow, which opened a
-   * second native window that turned out to have a persistent,
-   * unresolved rendering bug on real hardware). Also swaps to the
-   * '.compact-mode' layout, which the CSS hides the sidebar, right
-   * settings panel, and control bar with — leaving only the stage
-   * (caption + scene) and the Exit button. Current Position/Display
-   * mode/Font size are passed along so the window is sized/placed to
-   * match. Appearance needs no special handling here — it's the same
-   * #subtitleBox element/DOM the whole time, so whatever theme class
-   * is already applied (see setSubtitleAppearance()) just carries
-   * over automatically.
+   * openTranslationWindow()
+   * Usage: bound to the stage's bottom-right "Full Screen" button
+   * (id="maximizeBtn"). Calls api.py's open_translation_window(),
+   * which opens the separate full-screen "Translation" window showing
+   * the live captions and then minimizes this window to the OS
+   * taskbar. Replaces the old minimizeApp(), which only did the
+   * minimize half.
+   *
+   * The current caption styling is snapshotted and passed along so the
+   * full-screen window opens looking like the stage does right now
+   * rather than at defaults. These are read from the module-level
+   * current* variables the Caption Style / Display / Text Color
+   * controls already maintain (see setSubtitlePosition,
+   * setSubtitleAppearance, setCaptionTextColor, setFontSize,
+   * setDisplayMode) — so there's a single source of truth for each
+   * setting and no second copy to keep in sync.
+   *
+   * Note this is a one-way snapshot taken at open time: changing a
+   * caption setting afterwards won't restyle an already-open
+   * Translation window, since the main window is minimized and those
+   * controls aren't reachable anyway. Close and reopen to re-apply.
    */
-  function shrinkToCaptions() {
-    document.getElementById('app').classList.add('compact-mode');
-    document.getElementById('maximizeBtn').classList.add('hidden');
-    document.getElementById('exitCompactBtn').classList.remove('hidden');
-    callApi('shrink_to_captions', {
+  function openTranslationWindow() {
+    callApi('open_translation_window', {
       position: currentPosition,
-      displayMode: currentDisplayMode,
+      appearance: currentAppearance,
+      textColor: currentTextColor,
       fontSize: currentFontSize,
+      displayMode: currentDisplayMode,
     });
   }
-  /**
-   * exitCompactMode()
-   * Usage: bound to the Exit button that appears while '.compact-mode'
-   * is on #app (see the CSS rules under "Compact/maximized mode").
-   * Restores the sidebar, right settings panel, and control bar, and
-   * calls api.py's restore_full_size() to put the window back exactly
-   * where/how big it was before shrinkToCaptions() ran.
-   */
-  function exitCompactMode() {
-    document.getElementById('app').classList.remove('compact-mode');
-    document.getElementById('maximizeBtn').classList.remove('hidden');
-    document.getElementById('exitCompactBtn').classList.add('hidden');
-    callApi('restore_full_size');
-  }
-  document.getElementById('maximizeBtn').addEventListener('click', shrinkToCaptions);
-  document.getElementById('exitCompactBtn').addEventListener('click', exitCompactMode);
+  document.getElementById('maximizeBtn').addEventListener('click', openTranslationWindow);
 
   /**
    * loadMicrophones()

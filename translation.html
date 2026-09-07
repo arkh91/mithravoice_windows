@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Translation</title>
+<!--
+  translation.html
+
+  The second window opened by the stage's "Full Screen" button (see
+  api.py's open_translation_window). It runs full-screen and shows
+  nothing but the live captions, so the translation can be put on a
+  projector or second monitor while the main MithraVoice window is
+  minimized out of the way.
+
+  Python pushes updates here with the exact same
+  window.updateSubtitle(original, translated, isFinal) call it makes
+  into index.html, so both windows stay in sync from one code path
+  (see api.py's _push_result).
+
+  Caption styling is NOT duplicated here as its own set of controls —
+  it arrives as query-string params mirroring whatever Caption Style /
+  Display / Text Color is currently set on the main stage, and is
+  applied on load by applyStyleFromParams() below.
+-->
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #0b0e14;
+    color: #ffffff;
+  }
+
+  /* Full-bleed backdrop. The caption block inside is what moves for
+     the top/center/bottom Position setting — the backdrop always
+     fills the screen so there's never a bright desktop edge showing
+     around it on a projector. */
+  .screen {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    padding: 6vh 6vw;
+    background: #0b0e14;
+  }
+  .screen.pos-top    { justify-content: flex-start; }
+  .screen.pos-center { justify-content: center; }
+  .screen.pos-bottom { justify-content: flex-end; }
+
+  .box {
+    width: 100%;
+    box-sizing: border-box;
+    text-align: center;
+    padding: 28px 36px;
+    border-radius: 10px;
+    background: rgba(11, 14, 20, 0.97);
+    border: 1px solid rgba(232, 183, 58, 0.35);
+  }
+
+  .original,
+  .translated {
+    max-width: 100%;
+  }
+
+  .original { line-height: 1.45; }
+
+  .translated {
+    direction: rtl;
+    line-height: 1.7;
+    margin-top: 10px;
+  }
+
+  /* Background themes — mirrors index.html's
+     .subtitle-box.dark/.light/.custom rules. */
+  .box.light {
+    background: #ffffff;
+    border-color: rgba(0,0,0,0.15);
+  }
+  .box.custom {
+    background: #10151e;
+    border-color: rgba(232,183,58,0.35);
+  }
+
+  /* Text color is deliberately independent of the background theme,
+     exactly as it is on the main stage (see index.html's
+     setCaptionTextColor) — picking a background must not silently
+     change the text color too. */
+  .box.text-white { color: #ffffff; }
+  .box.text-black { color: #111111; }
+
+  .close-btn {
+    position: absolute;
+    top: 14px;
+    right: 16px;
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.10);
+    color: #ffffff;
+    font-size: 17px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 5;
+    /* Faint until hovered: this sits over a full-screen presentation
+       surface, so it shouldn't compete with the captions. */
+    opacity: 0.25;
+    transition: opacity 0.15s ease;
+  }
+  .close-btn:hover {
+    opacity: 1;
+    background: rgba(232,183,58,0.14);
+    border-color: #e8b73a;
+    color: #e8b73a;
+  }
+
+  .hint {
+    position: absolute;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 12px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: rgba(255,255,255,0.35);
+    transition: opacity 0.4s ease;
+  }
+  .hint.gone { opacity: 0; }
+</style>
+</head>
+<body>
+  <div class="screen pos-bottom" id="screen">
+    <button class="close-btn" id="closeBtn"
+            title="Close the Translation window and restore MithraVoice">&#10005;</button>
+    <div class="hint" id="hint">Press Esc to exit full screen</div>
+    <div class="box dark text-white" id="box">
+      <div class="original" id="orig">Waiting for speech…</div>
+      <div class="translated" id="trans"></div>
+    </div>
+  </div>
+
+<script>
+  const params = new URLSearchParams(location.search);
+  const screenEl = document.getElementById('screen');
+  const box = document.getElementById('box');
+  const origEl = document.getElementById('orig');
+  const transEl = document.getElementById('trans');
+
+  /**
+   * applyStyleFromParams()
+   * Usage: called once on load. Reads the caption-style params
+   * api.py's open_translation_window() put in the query string —
+   * position, appearance, textColor, fontSize, displayMode — and
+   * applies them so this window opens looking like the main stage
+   * rather than resetting to defaults. Every param is optional and
+   * falls back to the same default index.html starts with.
+   */
+  function applyStyleFromParams() {
+    const position = params.get('position') || 'bottom';
+    screenEl.className = 'screen pos-' +
+      (['top', 'center', 'bottom'].includes(position) ? position : 'bottom');
+
+    const appearance = params.get('appearance') || 'dark';
+    const textColor = params.get('textColor') || 'white';
+    box.className = 'box ' +
+      (['dark', 'light', 'custom'].includes(appearance) ? appearance : 'dark') +
+      ' text-' + (textColor === 'black' ? 'black' : 'white');
+
+    // The main stage's font size is tuned for a ~1280px window; this
+    // one fills the whole screen, so scale it up proportionally
+    // rather than showing 24px text on a projector. Clamped so a
+    // very wide display doesn't produce absurdly large type.
+    const baseFontSize = Number(params.get('fontSize')) || 24;
+    const scaled = Math.min(96, Math.round(baseFontSize * (window.innerWidth / 1280) * 1.6));
+    origEl.style.fontSize = Math.max(baseFontSize, scaled) + 'px';
+    transEl.style.fontSize = Math.max(baseFontSize, scaled) + 'px';
+
+    const displayMode = params.get('displayMode') || 'both';
+    origEl.style.display = (displayMode === 'translation') ? 'none' : 'block';
+    transEl.style.display = (displayMode === 'original') ? 'none' : 'block';
+    transEl.style.marginTop = (displayMode === 'both') ? '10px' : '0';
+  }
+
+  applyStyleFromParams();
+
+  /**
+   * closeWindow()
+   * Usage: internal — the single exit path, shared by the X button and
+   * the Esc key. Calls api.py's close_translation_window(), which
+   * destroys this window; that fires its `closed` event, which is what
+   * actually restores the minimized main window (see api.py's
+   * _on_translation_closed). Deliberately routed through Python rather
+   * than window.close() so the restore happens no matter how this
+   * window is dismissed, including via the OS window chrome.
+   */
+  function closeWindow() {
+    if (window.pywebview &&
+        window.pywebview.api &&
+        window.pywebview.api.close_translation_window) {
+      window.pywebview.api.close_translation_window();
+    }
+  }
+
+  document.getElementById('closeBtn').addEventListener('click', closeWindow);
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') closeWindow();
+  });
+
+  // The Esc hint has done its job after a few seconds; fade it out so
+  // it isn't sitting on screen for the whole presentation.
+  setTimeout(() => document.getElementById('hint').classList.add('gone'), 5000);
+
+  /**
+   * window.updateSubtitle(original, translated, isFinal)
+   * Usage: called BY PYTHON (via window.evaluate_js) — never from
+   * within this file. Identical signature and hook name to
+   * index.html's, so api.py's _push_result can send the exact same
+   * one-line script to both windows and keep them mirrored without
+   * knowing anything about which is which.
+   */
+  window.updateSubtitle = function (original, translated, isFinal) {
+    origEl.textContent = original || '';
+    transEl.textContent = translated || '';
+    origEl.style.opacity = isFinal ? '1' : '0.75';
+    transEl.style.opacity = isFinal ? '1' : '0.75';
+  };
+
+  // Recompute the scaled font size if the window is resized (e.g. the
+  // user drops out of full screen via the OS), so text stays readable
+  // at whatever size the window actually is.
+  window.addEventListener('resize', applyStyleFromParams);
+</script>
+</body>
+</html>

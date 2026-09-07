@@ -51,7 +51,7 @@ a = Analysis(
     binaries=azure_binaries,
     datas=[
         ("index.html", "."),
-        ("overlay.html", "."),  # floating caption window — see api.py's open_caption_overlay
+        ("translation.html", "."),  # full-screen captions window — see api.py's open_translation_window
         ("assets", "assets"),  # logo and other static images referenced by index.html
         ("VERSION", "."),  # so the running app can read its own version (see updater.py) — build-time-only otherwise
         ("models/whisper-small", "models/whisper-small"),
