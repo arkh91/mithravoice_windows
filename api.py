@@ -21,6 +21,8 @@ import ctypes
 import functools
 import json
 import sys
+import threading
+import time
 import webbrowser
 from typing import Optional
 from urllib.parse import urlencode
@@ -29,6 +31,7 @@ import requests
 import webview
 
 import history
+import usage
 from app_settings import load_settings, save_settings
 from audio import list_input_devices
 from config import settings
@@ -94,6 +97,24 @@ class Api:
         # forever even if the user never opens Settings.
         history.prune(load_settings().get("history_retention", "30_days"))
 
+        # --- Online-engine usage tracking (see usage.py) ---
+        # _online_started_at is a time.monotonic() timestamp for when
+        # the ONLINE engine (not offline — that's unmetered) last
+        # started being active; None while it isn't. monotonic() is
+        # used rather than time.time() since it can't jump backwards
+        # from a system clock change mid-session, which would corrupt
+        # the elapsed-time calculation.
+        self._online_started_at: Optional[float] = None
+        self._usage_lock = threading.Lock()
+        self._latest_usage_snapshot: Optional[usage.UsageSnapshot] = usage.get_cached_usage_snapshot()
+        # Flushes periodically (not just on engine-change/stop) so a
+        # long session that ends in a crash or force-quit doesn't lose
+        # more than ~USAGE_FLUSH_INTERVAL_SECONDS of reportable usage.
+        # Always running (daemon thread) but a no-op whenever
+        # _online_started_at is None, so it costs nothing while the
+        # offline engine or no session at all is active.
+        threading.Thread(target=self._usage_flush_loop, daemon=True).start()
+
     def attach_window(self, window) -> None:
         """
         attach_window(window)
@@ -131,11 +152,143 @@ class Api:
         _push_engine_change(mode)
         Usage: internal — the pipeline's on_engine_change callback. Lets
         the UI show a small "offline mode" indicator when Azure is
-        unavailable and the app has fallen back automatically.
+        unavailable and the app has fallen back automatically. Also
+        starts/stops online-usage tracking (see usage.py) — the offline
+        engine is unmetered, so time only accumulates while mode is
+        "online".
         """
+        if mode == "online":
+            self._start_online_tracking()
+        else:
+            self._flush_online_usage()
         if self._window is None:
             return
         self._window.evaluate_js(f"window.setEngineBadge({json.dumps(mode)})")
+
+    def _start_online_tracking(self) -> None:
+        """
+        _start_online_tracking()
+        Usage: internal — called whenever the pipeline reports the
+        online engine became active (initial start, or the watchdog
+        recovering back onto it). No-ops the clock-start if already
+        tracking, so a redundant on_engine_change("online") call never
+        resets it and under-counts. If there's no usage snapshot at
+        all yet (very first online session this run), seeds one
+        immediately with a 0-second report — otherwise the countdown
+        pill would sit empty for up to USAGE_FLUSH_INTERVAL_SECONDS
+        until the first periodic flush.
+        """
+        with self._usage_lock:
+            already_tracking = self._online_started_at is not None
+            if not already_tracking:
+                self._online_started_at = time.monotonic()
+        if already_tracking or self._latest_usage_snapshot is not None:
+            return
+        cached_status = get_cached_license_status()
+        snapshot = usage.report_usage(get_cached_token(), 0, plan_code=cached_status.plan_code)
+        self._latest_usage_snapshot = snapshot
+
+    def _flush_online_usage(self) -> Optional[dict]:
+        """
+        _flush_online_usage()
+        Usage: internal — reports however many seconds have elapsed
+        since online tracking last started or was last flushed
+        (whichever is more recent), then resets the clock rather than
+        clearing it entirely, so a still-ongoing online session keeps
+        accumulating correctly across multiple flushes rather than
+        only ever reporting once at the very end. Called from three
+        places: _push_engine_change() (engine switches away from
+        online), stop_session() (session ends), and the periodic
+        _usage_flush_loop() below (long-running safety net). Safe to
+        call when nothing is being tracked (no-ops, returns None).
+        Also handles enforcement: if the server reports the quota is
+        now exceeded, stops the session and notifies the UI.
+        """
+        with self._usage_lock:
+            if self._online_started_at is None:
+                return None
+            elapsed = time.monotonic() - self._online_started_at
+            self._online_started_at = time.monotonic()
+
+        cached_status = get_cached_license_status()
+        snapshot = usage.report_usage(get_cached_token(), elapsed, plan_code=cached_status.plan_code)
+        self._latest_usage_snapshot = snapshot
+        if snapshot is not None and snapshot.exceeded:
+            self._on_usage_exceeded()
+        return self._usage_snapshot_to_dict(snapshot)
+
+    def _on_usage_exceeded(self) -> None:
+        """
+        _on_usage_exceeded()
+        Usage: internal — called the moment a usage report comes back
+        exceeded=True. Ends the session outright (mirrors what a
+        failed start_session() plan check already does — see
+        toggleListening()'s handling of result.ok in index.html) and
+        pushes a dedicated JS hook so the UI can show a clear message
+        rather than just silently going quiet.
+        """
+        with self._usage_lock:
+            self._online_started_at = None
+        self._pipeline.stop()
+        if self._window is not None:
+            self._window.evaluate_js("window.onOnlineQuotaExceeded && window.onOnlineQuotaExceeded()")
+
+    def _usage_flush_loop(self) -> None:
+        """
+        _usage_flush_loop()
+        Usage: internal — runs for the lifetime of the app on a daemon
+        thread. Every USAGE_FLUSH_INTERVAL_SECONDS, flushes whatever
+        online usage has accumulated so far, so a crash or force-quit
+        mid-session can't lose more than one interval's worth of
+        reportable time. A no-op tick (via _flush_online_usage()'s own
+        guard) whenever the online engine isn't currently active.
+        """
+        USAGE_FLUSH_INTERVAL_SECONDS = 20
+        while True:
+            time.sleep(USAGE_FLUSH_INTERVAL_SECONDS)
+            try:
+                self._flush_online_usage()
+            except Exception as exc:
+                print(f"[USAGE] periodic flush failed: {exc!r}", flush=True)
+
+    @staticmethod
+    def _usage_snapshot_to_dict(snapshot: Optional[usage.UsageSnapshot]) -> Optional[dict]:
+        """
+        _usage_snapshot_to_dict(snapshot)
+        Usage: internal — JSON-serializable shape for get_usage_status()
+        and the return value of _flush_online_usage(), factoring in
+        pending_seconds (usage reported locally but not yet confirmed
+        by the server, e.g. during a network blip) so the displayed
+        countdown reflects the most current estimate available.
+        """
+        if snapshot is None:
+            return None
+        remaining = snapshot.seconds_remaining
+        if remaining is not None:
+            remaining = max(0, remaining)
+        return {
+            "seconds_used": snapshot.seconds_used,
+            "seconds_included": snapshot.seconds_included,
+            "seconds_remaining": remaining,
+            "period_end": snapshot.period_end,
+            "exceeded": snapshot.exceeded,
+        }
+
+    def get_usage_status(self):
+        """
+        get_usage_status()
+        Usage (JS): window.pywebview.api.get_usage_status().then(status => ...)
+        Polled periodically by the countdown pill in index.html.
+        Returns the latest known snapshot (cached from disk on launch,
+        refreshed by every _flush_online_usage() call) without itself
+        triggering a network call or resetting the tracking clock —
+        that only happens on an actual engine-mode change, session
+        stop, or the periodic background flush. Returns None if this
+        plan has no online usage tracked yet (e.g. never used the
+        online engine, or an offline-only/pay-as-you-go plan with no
+        monthly cap to show).
+        """
+        return self._usage_snapshot_to_dict(self._latest_usage_snapshot)
 
     def _push_audio_level(self, level: float) -> None:
         """
@@ -254,9 +407,12 @@ class Api:
         """
         stop_session()
         Usage (JS): window.pywebview.api.stop_session()
-        Ends the session — releases the mic and closes the active engine.
+        Ends the session — releases the mic and closes the active
+        engine, and flushes any accumulated online usage (see
+        usage.py) so it isn't left to the next periodic flush.
         """
         self._pipeline.stop()
+        self._flush_online_usage()
         return {"ok": True}
 
     @_log_click
@@ -461,11 +617,18 @@ class Api:
         exit_app()
         Usage (JS): window.pywebview.api.exit_app()
         Closes the app entirely. Bound to the sidebar's Exit button
-        (id="exitAppBtn" in index.html), below About. destroy() closes
-        just this window; since main.py only ever creates the one
-        (master) window, that's enough to end webview.start()'s event
-        loop and let the process exit normally afterward.
+        (id="exitAppBtn" in index.html), below About. Flushes any
+        accumulated online usage first, best-effort, so quitting mid-
+        session doesn't lose more than the periodic flush interval
+        would have anyway. destroy() closes just this window; since
+        main.py only ever creates the one (master) window, that's
+        enough to end webview.start()'s event loop and let the process
+        exit normally afterward.
         """
+        try:
+            self._flush_online_usage()
+        except Exception:
+            pass  # never block quitting the app over a usage-reporting hiccup
         if self._window is not None:
             self._window.destroy()
 

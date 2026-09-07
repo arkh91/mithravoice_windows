@@ -184,6 +184,36 @@
     color: var(--text-primary);
   }
 
+  /* Online-hours countdown (see usage.py) — mirrors .status-pill but
+     sits top-right instead of top-left, and only ever appears when
+     the current plan actually has a monthly online-hours cap to show
+     (see loadUsageStatus() in the script below). Turns amber under 30
+     minutes remaining and red under 5, using the same --gold/red
+     language as the rest of the app rather than a generic warning
+     color. */
+  .usage-pill {
+    position: absolute;
+    top: 18px;
+    right: 18px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(10,13,20,0.55);
+    backdrop-filter: blur(6px);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 999px;
+    padding: 8px 14px;
+    font-size: 12.5px;
+    color: var(--text-secondary);
+    z-index: 4;
+  }
+  .usage-pill.hidden { display: none; }
+  .usage-pill svg { flex-shrink: 0; opacity: 0.7; }
+  .usage-pill.low { color: var(--gold); border-color: rgba(232, 183, 58, 0.35); }
+  .usage-pill.low svg { opacity: 1; }
+  .usage-pill.critical { color: #e05a5a; border-color: rgba(220, 68, 68, 0.35); }
+  .usage-pill.critical svg { opacity: 1; }
+
   .maximize-btn {
     position: absolute;
     bottom: 18px;
@@ -267,9 +297,6 @@
     left: 50%;
     transform: translateX(-50%);
     max-width: 84%;
-    background: rgba(8,10,15,0.72);
-    backdrop-filter: blur(10px);
-    border: 1px solid rgba(255,255,255,0.06);
     border-radius: 12px;
     padding: 22px 30px;
     text-align: center;
@@ -278,8 +305,44 @@
   .subtitle-box.pos-center { top: 50%; transform: translate(-50%, -50%); }
   .subtitle-box.pos-top { top: 22px; }
 
+  /* Background (Settings > Caption Style > Background: Dark/Light/
+     Custom) — controls ONLY the box's background/border/blur, never
+     text color. Text color used to be tied to this (Light forced
+     black text, etc.), which meant picking a background could
+     silently change readability in a way that had nothing to do with
+     what you were adjusting. Text color is now its own independent
+     control — see "Text Color" below and .subtitle-box.text-white/
+     .text-black further down — so any background can be paired with
+     either text color. */
+  .subtitle-box.dark {
+    background: rgba(8,10,15,0.72);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255,255,255,0.06);
+  }
+
+  /* Light: fully transparent per request — no box at all, just the
+     text floating over the scene. No blur either (a blur filter alone
+     would still visibly soften the background behind it, which isn't
+     "transparent"). */
+  .subtitle-box.light {
+    background: transparent;
+    border: none;
+    backdrop-filter: none;
+  }
+
+  /* Custom: no full color-picker UI exists yet to make this truly
+     user-customizable, but it needs to be visibly its own distinct
+     appearance rather than doing nothing — a warm gold-tinted glass
+     panel, matching the app's own accent color instead of Dark's
+     neutral one. */
+  .subtitle-box.custom {
+    background: rgba(58, 41, 20, 0.68);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(232, 183, 58, 0.35);
+  }
+  .subtitle-box.custom .subtitle-original .highlight { color: #ffd27a; }
+
   .subtitle-original {
-    color: var(--text-primary);
     line-height: 1.5;
     font-weight: 400;
   }
@@ -287,12 +350,21 @@
 
   .subtitle-translation {
     direction: rtl;
-    color: var(--text-primary);
     line-height: 1.9;
     margin-top: 12px;
     font-weight: 400;
   }
   .subtitle-translation .highlight { color: var(--gold); font-weight: 600; }
+
+  /* Text Color (Settings > Translation Style > Text Color) —
+     independent of Background above, per request: picking Light
+     shouldn't silently force black text. Applied to #subtitleBox
+     alongside whichever dark/light/custom class is active. white
+     matches the app's existing --text-primary default. */
+  .subtitle-box.text-white .subtitle-original,
+  .subtitle-box.text-white .subtitle-translation { color: var(--text-primary); }
+  .subtitle-box.text-black .subtitle-original,
+  .subtitle-box.text-black .subtitle-translation { color: #000; }
 
   /* ---------- Control bar ---------- */
   .control-bar {
@@ -794,7 +866,16 @@
         </div>
       </div>
 
-      <div class="subtitle-box pos-bottom" id="subtitleBox" style="font-size:24px;">
+      <!-- Online-hours countdown: hidden by default, shown by
+           loadUsageStatus() only when get_usage_status() reports an
+           actual monthly cap (offline-only and pay-as-you-go plans
+           have none, so it stays hidden for those). -->
+      <div class="usage-pill" id="usagePill" title="Online engine hours remaining this month">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+        <span id="usagePillText">&infin;</span>
+      </div>
+
+      <div class="subtitle-box pos-bottom dark text-white" id="subtitleBox" style="font-size:24px;">
         <div class="subtitle-original" id="subOriginal">
           This is a <span class="highlight">real-time</span> translation. You can speak and see the translation instantly.
         </div>
@@ -894,7 +975,20 @@
       </button>
     </div>
 
-    <!-- Translation Style -->
+    <!-- Translation Style: kept standalone — this is about HOW the
+         translation is worded (linguistic), which is a different
+         question from how the caption box looks. See "Caption Style"
+         below for the merged visual settings (background/position/
+         text size), which used to be split across this section (font
+         size didn't really belong here either), a separate Position
+         section, and a separate Appearance section.
+
+         Text Color lives here rather than in Caption Style's
+         Background control on purpose: Background used to also force
+         a specific text color per theme (e.g. Light forced black),
+         which meant picking a background could silently change
+         something unrelated to what you were adjusting. Keeping them
+         in separate sections makes that independence obvious. -->
     <div class="section">
       <div class="section-title">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7V4h16v3M9 20h6M12 4v16"/></svg>
@@ -905,47 +999,30 @@
         <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
       </div>
 
-      <div class="field-label top-margin">Font Size</div>
-      <div class="slider-row">
-        <!-- Decreases the subtitle font size by 1px, min 14px -->
-        <button class="slider-btn" id="fontMinus">−</button>
-        <input type="range" id="fontSlider" min="14" max="40" value="24">
-        <!-- Increases the subtitle font size by 1px, max 40px -->
-        <button class="slider-btn" id="fontPlus">+</button>
-      </div>
-      <div style="display:flex; justify-content:flex-end; margin-top:4px;">
-        <span class="font-size-val" id="fontVal">24</span>
-      </div>
-    </div>
-
-    <!-- Position -->
-    <div class="section">
-      <div class="section-title">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 15h18"/></svg>
-        Position
-      </div>
+      <div class="field-label top-margin">Text Color</div>
       <div class="row-3">
-        <button class="option-btn active" data-position="bottom">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="12" rx="1"/><path d="M3 16h18"/></svg>
-          Bottom
+        <button class="option-btn active" data-textcolor="white">
+          <span style="width:9px;height:9px;border-radius:50%;background:#fff;border:1px solid rgba(255,255,255,0.3);display:inline-block;"></span>
+          White
         </button>
-        <button class="option-btn" data-position="top">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="8" width="18" height="12" rx="1"/><path d="M3 8h18"/></svg>
-          Top
-        </button>
-        <button class="option-btn" data-position="center">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="1"/></svg>
-          Center
+        <button class="option-btn" data-textcolor="black">
+          <span style="width:9px;height:9px;border-radius:50%;background:#000;display:inline-block;"></span>
+          Black
         </button>
       </div>
     </div>
 
-    <!-- Appearance -->
+    <!-- Caption Style: everything that affects how the caption box
+         itself looks/sits on screen, consolidated into one section —
+         Background (was "Appearance"), Position, and Text (font
+         size). -->
     <div class="section">
       <div class="section-title">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M1 12h2M21 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/></svg>
-        Appearance
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+        Caption Style
       </div>
+
+      <div class="field-label">Background</div>
       <div class="row-3">
         <button class="option-btn active" data-theme="dark">
           <div style="display:flex; gap:3px;">
@@ -965,6 +1042,34 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="13.5" cy="6.5" r="0.5"/><circle cx="17.5" cy="10.5" r="0.5"/><circle cx="8.5" cy="7.5" r="0.5"/><circle cx="6.5" cy="12.5" r="0.5"/><path d="M12 2a10 10 0 1 0 0 20c1.1 0 2-.9 2-2 0-.5-.2-1-.5-1.4-.3-.4-.5-.8-.5-1.3 0-1.1.9-2 2-2h2.3a3.7 3.7 0 0 0 3.7-3.7C21 6.4 17 2 12 2z"/></svg>
           Custom
         </button>
+      </div>
+
+      <div class="field-label top-margin">Position</div>
+      <div class="row-3">
+        <button class="option-btn active" data-position="bottom">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="12" rx="1"/><path d="M3 16h18"/></svg>
+          Bottom
+        </button>
+        <button class="option-btn" data-position="top">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="8" width="18" height="12" rx="1"/><path d="M3 8h18"/></svg>
+          Top
+        </button>
+        <button class="option-btn" data-position="center">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="1"/></svg>
+          Center
+        </button>
+      </div>
+
+      <div class="field-label top-margin">Text</div>
+      <div class="slider-row">
+        <!-- Decreases the subtitle font size by 1px, min 14px -->
+        <button class="slider-btn" id="fontMinus">−</button>
+        <input type="range" id="fontSlider" min="14" max="40" value="24">
+        <!-- Increases the subtitle font size by 1px, max 40px -->
+        <button class="slider-btn" id="fontPlus">+</button>
+      </div>
+      <div style="display:flex; justify-content:flex-end; margin-top:4px;">
+        <span class="font-size-val" id="fontVal">24</span>
       </div>
     </div>
 
@@ -1271,6 +1376,7 @@
   let currentPosition = 'bottom';
   let currentDisplayMode = 'both';
   let currentFontSize = 24;
+  let currentAppearance = 'dark';
 
   /**
    * setDisplayMode(mode)
@@ -1298,6 +1404,40 @@
     box.classList.remove('pos-bottom', 'pos-top', 'pos-center');
     box.classList.add('pos-' + position);
     currentPosition = position;
+  }
+
+  /**
+   * setSubtitleAppearance(theme)
+   * Usage: theme is "dark" | "light" | "custom". Swaps the subtitle
+   * box's BACKGROUND treatment by CSS class (see the
+   * .subtitle-box.dark/.light/.custom rules), mirroring the Background
+   * control under Caption Style. Deliberately affects background only,
+   * not text color — see setCaptionTextColor() below, which used to
+   * be bundled into this (Light forced black text) until that turned
+   * out to be an unwanted side effect: picking a background shouldn't
+   * silently change something unrelated to what you were adjusting.
+   */
+  function setSubtitleAppearance(theme) {
+    const box = document.getElementById('subtitleBox');
+    box.classList.remove('dark', 'light', 'custom');
+    box.classList.add(theme);
+    currentAppearance = theme;
+  }
+
+  /**
+   * setCaptionTextColor(color)
+   * Usage: color is "white" | "black". Independent of
+   * setSubtitleAppearance() above — see Settings > Translation Style >
+   * Text Color. Applied as its own class on #subtitleBox (see the
+   * .subtitle-box.text-white/.text-black rules) so any Background
+   * choice can be paired with either text color.
+   */
+  let currentTextColor = 'white';
+  function setCaptionTextColor(color) {
+    const box = document.getElementById('subtitleBox');
+    box.classList.remove('text-white', 'text-black');
+    box.classList.add('text-' + color);
+    currentTextColor = color;
   }
 
   /**
@@ -1481,7 +1621,8 @@
 
   setupExclusiveGroup('[data-display]', d => setDisplayMode(d.display));
   setupExclusiveGroup('[data-position]', d => setSubtitlePosition(d.position));
-  setupExclusiveGroup('[data-theme]', () => { /* theme swap hooked up once backend/theme tokens exist */ });
+  setupExclusiveGroup('[data-theme]', dataset => setSubtitleAppearance(dataset.theme));
+  setupExclusiveGroup('[data-textcolor]', dataset => setCaptionTextColor(dataset.textcolor));
 
   // Settings page: history retention and engine mode both persist
   // immediately via save_app_settings — no separate Save button.
@@ -1668,10 +1809,12 @@
    * unresolved rendering bug on real hardware). Also swaps to the
    * '.compact-mode' layout, which the CSS hides the sidebar, right
    * settings panel, and control bar with — leaving only the stage
-   * (caption + scene) and the Exit button. Current Position/Display mode/Font size are
-   * passed along so the window is sized/placed to match (theme swap
-   * isn't wired up yet anywhere else in the app, so appearance is
-   * left as-is).
+   * (caption + scene) and the Exit button. Current Position/Display
+   * mode/Font size are passed along so the window is sized/placed to
+   * match. Appearance needs no special handling here — it's the same
+   * #subtitleBox element/DOM the whole time, so whatever theme class
+   * is already applied (see setSubtitleAppearance()) just carries
+   * over automatically.
    */
   function shrinkToCaptions() {
     document.getElementById('app').classList.add('compact-mode');
@@ -1901,12 +2044,122 @@
    * Usage: called BY PYTHON when the pipeline switches between "online"
    * and "offline" engines (including an automatic mid-session fallback
    * if the internet drops). Updates the status pill's label so the user
-   * knows translation is still running, just locally.
+   * knows translation is still running, just locally. Also tracks
+   * currentEngineMode so the usage countdown below only ticks down
+   * while the metered online engine (not the free offline one) is
+   * actually active.
    */
+  let currentEngineMode = null;  // null until the first session sets it — treated same as 'offline' (shows ∞)
   window.setEngineBadge = function (mode) {
+    currentEngineMode = mode;
     const statusText = document.getElementById('statusText');
     const base = listening ? 'Listening…' : 'Paused';
     statusText.textContent = mode === 'offline' ? base + ' (Offline)' : base;
+  };
+
+  /**
+   * Online-hours countdown (see usage.py / api.py's get_usage_status())
+   * Usage: usageRemainingSeconds/usageIncludedSeconds mirror the
+   * server's last-known answer (or usage.py's local fallback while no
+   * real server endpoint exists yet — see its module docstring).
+   * loadUsageStatus() re-syncs (via Python's cached snapshot — no
+   * network call of its own on every poll, see get_usage_status()'s
+   * docstring) every USAGE_POLL_MS; a separate 1-second ticker
+   * decrements the local copy smoothly in between polls, but only
+   * while actually consuming metered time (listening AND the online
+   * engine is the one active).
+   *
+   * The pill itself is ALWAYS visible, not just for capped online
+   * plans: it shows "∞" whenever engine time isn't being metered right
+   * now — the offline engine (free/unlimited) or a plan with no fixed
+   * monthly cap (pay-as-you-go) — and only switches to a real
+   * countdown once the online engine, on a capped plan, is actually
+   * running.
+   */
+  const USAGE_POLL_MS = 20000;
+  let usageRemainingSeconds = null;
+  let usageIncludedSeconds = null;
+
+  function formatUsageRemaining(seconds) {
+    if (seconds <= 0) return 'Out of online hours';
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    if (h > 0) return `${h}h ${m}m left`;
+    const s = Math.floor(seconds % 60);
+    return m > 0 ? `${m}m ${s}s left` : `${s}s left`;
+  }
+
+  function renderUsagePill() {
+    const pill = document.getElementById('usagePill');
+    const textEl = document.getElementById('usagePillText');
+    pill.classList.remove('low', 'critical');
+
+    // Unmetered right now: offline engine, or no capped plan data at
+    // all (also covers "haven't started an online session yet").
+    if (currentEngineMode !== 'online' || usageIncludedSeconds === null || usageRemainingSeconds === null) {
+      textEl.textContent = '\u221E';  // ∞
+      pill.title = currentEngineMode === 'online'
+        ? 'No monthly online-hours cap on this plan'
+        : 'Offline engine — unlimited, no online hours used';
+      return;
+    }
+
+    textEl.textContent = formatUsageRemaining(usageRemainingSeconds);
+    pill.title = 'Online engine hours remaining this month';
+    pill.classList.toggle('critical', usageRemainingSeconds <= 300);
+    pill.classList.toggle('low', usageRemainingSeconds > 300 && usageRemainingSeconds <= 1800);
+  }
+
+  /**
+   * loadUsageStatus()
+   * Usage: called once on load and every USAGE_POLL_MS afterward.
+   * get_usage_status() returns null before the online engine has ever
+   * run this session, or for plans with no monthly cap — renderUsagePill()
+   * shows "∞" for both of those, same as it does for offline mode.
+   */
+  function loadUsageStatus() {
+    callApi('get_usage_status').then(status => {
+      if (!status || status.seconds_included === null || status.seconds_included === undefined) {
+        usageRemainingSeconds = null;
+        usageIncludedSeconds = null;
+        renderUsagePill();
+        return;
+      }
+      usageIncludedSeconds = status.seconds_included;
+      usageRemainingSeconds = status.seconds_remaining;
+      renderUsagePill();
+    });
+  }
+  loadUsageStatus();
+  setInterval(loadUsageStatus, USAGE_POLL_MS);
+
+  // Local 1-second ticker between server polls — purely cosmetic
+  // smoothness; the server's own count (synced every USAGE_POLL_MS)
+  // is always the source of truth, so any local drift self-corrects
+  // on the next poll rather than accumulating.
+  setInterval(() => {
+    if (usageRemainingSeconds === null) return;
+    if (!listening || currentEngineMode !== 'online') return;
+    usageRemainingSeconds = Math.max(0, usageRemainingSeconds - 1);
+    renderUsagePill();
+  }, 1000);
+
+  /**
+   * window.onOnlineQuotaExceeded()
+   * Usage: called BY PYTHON (see api.py's _on_usage_exceeded()) the
+   * moment a usage report comes back showing this month's online
+   * hours are used up. The session has already been stopped
+   * server/pipeline-side by that point — this just brings the UI back
+   * in sync: reverts the mic/pause button state and explains why,
+   * the same way a rejected start_session() plan check already does
+   * in toggleListening() below.
+   */
+  window.onOnlineQuotaExceeded = function () {
+    listening = false;
+    sessionStarted = false;
+    setListening(false);
+    document.getElementById('statusText').textContent = 'Online hours used up this month';
+    loadUsageStatus();
   };
 
   /**
@@ -1948,38 +2201,22 @@
     updateBarHeights('controlWave', clamped, 4, 22);
   };
 
-  // Render the mountain/sunset scene once as inline SVG (kept out of the
-  // template string above for readability).
   /**
    * renderDefaultScene()
-   * Usage: draws the default mountain/sunset SVG into #scene. Called
-   * once on load.
+   * Usage: sets #scene's background to the branded mountain/sunset
+   * photo (assets/scene_default.jpg). Called once on load. Previously
+   * this drew an inline SVG illustration instead — replaced with the
+   * real photo per request. Note: the source photo is only 612x408px,
+   * which will look soft when stretched across a large window; swap
+   * in a higher-resolution version of the same shot if sharpness at
+   * full size matters.
    */
   function renderDefaultScene() {
-    document.getElementById('scene').innerHTML = `
-      <svg viewBox="0 0 900 620" preserveAspectRatio="xMidYMid slice" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg">
-        <defs>
-          <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stop-color="#141c2c"/>
-            <stop offset="35%" stop-color="#2b3448"/>
-            <stop offset="58%" stop-color="#c9713f"/>
-            <stop offset="72%" stop-color="#e8a94f"/>
-            <stop offset="100%" stop-color="#3a2210"/>
-          </linearGradient>
-          <radialGradient id="sun" cx="50%" cy="50%" r="50%">
-            <stop offset="0%" stop-color="#fff6d8"/>
-            <stop offset="55%" stop-color="#f5c95c"/>
-            <stop offset="100%" stop-color="#f5c95c" stop-opacity="0"/>
-          </radialGradient>
-        </defs>
-        <rect width="900" height="620" fill="url(#sky)"/>
-        <circle cx="560" cy="400" r="140" fill="url(#sun)"/>
-        <circle cx="560" cy="400" r="46" fill="#fff2c9"/>
-        <polygon points="0,470 120,300 230,420 330,260 460,470" fill="#0f1420" opacity="0.75"/>
-        <polygon points="230,500 400,320 520,440 700,300 900,480 900,620 0,620 0,500" fill="#0a0d16" opacity="0.9"/>
-        <rect x="0" y="470" width="900" height="150" fill="#1b1f2c" opacity="0.35"/>
-      </svg>
-    `;
+    const scene = document.getElementById('scene');
+    scene.style.backgroundImage = "url('assets/scene_default.jpg')";
+    scene.style.backgroundSize = 'cover';
+    scene.style.backgroundPosition = 'center';
+    scene.style.backgroundRepeat = 'no-repeat';
   }
   renderDefaultScene();
 </script>
