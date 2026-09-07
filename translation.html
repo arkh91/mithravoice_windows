@@ -7,10 +7,18 @@
   translation.html
 
   The second window opened by the stage's "Full Screen" button (see
-  api.py's open_translation_window). It runs full-screen and shows
-  nothing but the live captions, so the translation can be put on a
-  projector or second monitor while the main MithraVoice window is
-  minimized out of the way.
+  api.py's open_translation_window). It occupies the BOTTOM THIRD of
+  the display at full width and shows nothing but the live captions,
+  so whatever is being presented in the upper two thirds — slides, a
+  document, a video call — stays visible while the translation runs
+  underneath it. The main MithraVoice window is minimized out of the
+  way at the same time.
+
+  The window's size and position are decided in Python from the
+  actual display resolution (api.py's _bottom_strip_geometry); this
+  file only has to lay out well inside whatever strip it is given,
+  which on a 1080p screen is roughly 1920x340 and on a 768p laptop
+  roughly 1366x230. Nothing below assumes a specific height.
 
   Python pushes updates here with the exact same
   window.updateSubtitle(original, translated, isFinal) call it makes
@@ -23,6 +31,12 @@
   applied on load by applyStyleFromParams() below.
 -->
 <style>
+  /* MUST stay transparent. api.py opens this window with
+     transparent=True, which on Windows makes pywebview chroma-key the
+     window on pure red and set the WebView2 control's
+     DefaultBackgroundColor to transparent. An opaque background here
+     would simply paint over that and the window would be a solid
+     block again. Only the caption panel below draws a background. */
   html, body {
     margin: 0;
     padding: 0;
@@ -30,14 +44,13 @@
     height: 100%;
     overflow: hidden;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    background: #0b0e14;
+    background: transparent;
     color: #ffffff;
   }
 
-  /* Full-bleed backdrop. The caption block inside is what moves for
-     the top/center/bottom Position setting — the backdrop always
-     fills the screen so there's never a bright desktop edge showing
-     around it on a projector. */
+  /* Layout shell only — it paints nothing. The caption panel inside
+     is the sole visible surface; everything outside it is punched
+     through to the desktop. */
   .screen {
     position: relative;
     width: 100%;
@@ -45,22 +58,37 @@
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
-    padding: 6vh 6vw;
-    background: #0b0e14;
+    /* Just enough inset for the panel's rounded corners and border to
+       read as a panel rather than a cut-off rectangle. Everything in
+       this margin is transparent, so it is the only part of the
+       window the desktop shows through. */
+    padding: 6px;
+    background: transparent;
   }
-  .screen.pos-top    { justify-content: flex-start; }
-  .screen.pos-center { justify-content: center; }
-  .screen.pos-bottom { justify-content: flex-end; }
 
+  /* The panel fills the window rather than hugging its text, so the
+     caption occupies the strip the user positioned instead of
+     floating in the middle of it. flex:1 takes all remaining height;
+     the Position setting now places the TEXT within the panel (see
+     the .screen.pos-* rules below) rather than the panel within the
+     window, which it no longer needs to do. */
   .box {
+    flex: 1;
     width: 100%;
     box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
     text-align: center;
-    padding: 28px 36px;
+    /* Right padding is the largest so the caption text clears the
+       close button in the corner. */
+    padding: clamp(10px, 3%, 24px) clamp(48px, 5%, 64px) clamp(10px, 3%, 24px) clamp(16px, 3%, 40px);
     border-radius: 10px;
     background: rgba(11, 14, 20, 0.97);
     border: 1px solid rgba(232, 183, 58, 0.35);
   }
+  .screen.pos-top    .box { justify-content: flex-start; }
+  .screen.pos-center .box { justify-content: center; }
+  .screen.pos-bottom .box { justify-content: flex-end; }
 
   .original,
   .translated {
@@ -109,9 +137,10 @@
     align-items: center;
     justify-content: center;
     z-index: 5;
-    /* Faint until hovered: this sits over a full-screen presentation
-       surface, so it shouldn't compete with the captions. */
-    opacity: 0.25;
+    /* Subdued so it doesn't compete with the captions, but no longer
+       nearly-invisible: with the title bar gone this and the Esc key
+       are the only ways to close the window. */
+    opacity: 0.5;
     transition: opacity 0.15s ease;
   }
   .close-btn:hover {
@@ -133,13 +162,21 @@
     transition: opacity 0.4s ease;
   }
   .hint.gone { opacity: 0; }
+  .hint {
+    /* Sits inside the panel now that the panel fills the window, so
+       it needs to stay legible against it. */
+    z-index: 6;
+    background: rgba(11, 14, 20, 0.6);
+    padding: 3px 10px;
+    border-radius: 999px;
+  }
 </style>
 </head>
 <body>
   <div class="screen pos-bottom" id="screen">
     <button class="close-btn" id="closeBtn"
             title="Close the Translation window and restore MithraVoice">&#10005;</button>
-    <div class="hint" id="hint">Press Esc to exit full screen</div>
+    <div class="hint" id="hint">Press Esc to close</div>
     <div class="box dark text-white" id="box">
       <div class="original" id="orig">Waiting for speech…</div>
       <div class="translated" id="trans"></div>
@@ -173,22 +210,62 @@
       (['dark', 'light', 'custom'].includes(appearance) ? appearance : 'dark') +
       ' text-' + (textColor === 'black' ? 'black' : 'white');
 
-    // The main stage's font size is tuned for a ~1280px window; this
-    // one fills the whole screen, so scale it up proportionally
-    // rather than showing 24px text on a projector. Clamped so a
-    // very wide display doesn't produce absurdly large type.
+    // Font size has to satisfy TWO constraints, and the smaller wins.
+    //
+    // By width: the main stage's size is tuned for a ~1280px window,
+    // and this strip is usually wider, so scale up proportionally
+    // rather than showing 24px text across a 1920px projector.
+    //
+    // By height: this window is only a third of the screen tall, so
+    // an unconstrained width-based size overflows it — on a 1080p
+    // display that is ~340px of window for what may be two lines of
+    // original plus two of translation, and overflow is hidden, so
+    // text would silently vanish rather than just look cramped. The
+    // divisor accounts for four text lines plus padding.
     const baseFontSize = Number(params.get('fontSize')) || 24;
-    const scaled = Math.min(96, Math.round(baseFontSize * (window.innerWidth / 1280) * 1.6));
-    origEl.style.fontSize = Math.max(baseFontSize, scaled) + 'px';
-    transEl.style.fontSize = Math.max(baseFontSize, scaled) + 'px';
-
     const displayMode = params.get('displayMode') || 'both';
+    const linesShown = (displayMode === 'both') ? 4 : 2;
+
+    const byWidth = baseFontSize * (window.innerWidth / 1280) * 1.6;
+    const byHeight = (window.innerHeight * 0.82) / (linesShown * 1.55);
+    const fontSize = Math.max(13, Math.min(96, Math.round(Math.min(byWidth, byHeight))));
+
+    origEl.style.fontSize = fontSize + 'px';
+    transEl.style.fontSize = fontSize + 'px';
+
     origEl.style.display = (displayMode === 'translation') ? 'none' : 'block';
     transEl.style.display = (displayMode === 'original') ? 'none' : 'block';
     transEl.style.marginTop = (displayMode === 'both') ? '10px' : '0';
   }
 
   applyStyleFromParams();
+
+  /**
+   * reportGeometry()
+   * Usage: called once on load. Tells Python what size this window
+   * actually ended up being, so api.py's
+   * report_translation_geometry() can print whether the bottom-third
+   * calculation survived the display's DPI scaling. Purely a
+   * diagnostic — nothing here reads the result, and the window
+   * renders identically whether or not the bridge is present.
+   *
+   * Runs on a short delay rather than immediately: pywebview's
+   * window.pywebview.api object is injected asynchronously, so a
+   * synchronous call at script-evaluation time can land before the
+   * bridge exists and be silently lost.
+   */
+  function reportGeometry() {
+    if (window.pywebview &&
+        window.pywebview.api &&
+        window.pywebview.api.report_translation_geometry) {
+      window.pywebview.api.report_translation_geometry(
+        window.innerWidth,
+        window.innerHeight,
+        window.devicePixelRatio || 1
+      );
+    }
+  }
+  setTimeout(reportGeometry, 400);
 
   /**
    * closeWindow()

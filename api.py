@@ -47,6 +47,350 @@ from updater import check_for_update as _check_for_update
 from updater import get_current_version
 
 
+# --- Translation window geometry ---------------------------------
+# The "Full Screen" button's Translation window is not literally
+# full-screen: it takes the BOTTOM THIRD of the display, full width,
+# so whatever is behind it (slides, a document, a video call) stays
+# visible in the upper two thirds while the captions run underneath.
+#
+# Nothing here is hardcoded to a resolution — the thirds are computed
+# from whatever the display actually reports at the moment the window
+# opens (see _bottom_strip_geometry), so 1366x768, 1920x1080 and
+# 2560x1440 all get a proportional strip rather than a fixed pixel
+# height that would be a sliver on one and half the screen on another.
+TRANSLATION_SCREEN_DIVISIONS = 3  # 3 => bottom third. 4 => bottom quarter, etc.
+
+# Measure the thirds against the WORK AREA (screen minus taskbar)
+# rather than the raw screen bounds. With raw bounds, the bottom of
+# the strip — which is where the translated line sits — lands behind
+# the Windows taskbar and is simply not readable. Set False for a
+# literal thirds-of-the-whole-screen split.
+TRANSLATION_USE_WORK_AREA = True
+
+# Normally None, meaning "ask Windows for the display scaling". Set a
+# number here only to override that detection; see _display_scale().
+TRANSLATION_DPI_SCALE_OVERRIDE = None
+
+# Drop the OS title bar. The window's own X button and the Esc key
+# (see translation.html) become the only way to close it, which is why
+# both exist.
+TRANSLATION_FRAMELESS = True
+
+# Draw only the caption panel, letting whatever is behind show through
+# the margin around it.
+#
+# Windows transparency here is not alpha blending, it is CHROMA KEYING:
+# pywebview sets the form's TransparencyKey to pure red (255,0,0) and
+# the WebView2 control's DefaultBackgroundColor to transparent, so any
+# pixel that ends up pure red is punched out of the window entirely.
+# Two consequences worth knowing:
+#   - Those punched-out regions are CLICK-THROUGH. Clicks land on the
+#     application behind instead of on this window. Harmless here
+#     because the caption panel covers nearly the whole strip.
+#   - Nothing in the UI may be pure red or it will vanish. The palette
+#     is dark navy and gold, so this is not currently a constraint,
+#     but it is one to remember before adding a red error state.
+#
+# Set False if the window comes up red or white instead of
+# transparent, which would mean this WebView2 runtime doesn't support
+# it — the window then just draws its dark background as before.
+TRANSLATION_TRANSPARENT = True
+
+def _display_scale() -> float:
+    """
+    _display_scale()
+    Usage: returns the display scaling factor as a plain float — 1.0
+    at 100%, 1.5 at 150%. Called by _bottom_strip_geometry(); not
+    useful on its own. Always returns 1.0 off Windows.
+
+    This is needed because pywebview does not use one unit convention
+    for its own geometry arguments on Windows. create_window() assigns
+    the requested size to a WinForms Form that has
+    AutoScaleMode.Dpi with AutoScaleDimensions of 96 DPI, so WinForms
+    multiplies it by (current DPI / 96) before the window is shown —
+    but the same call assigns the requested position to Form.Location
+    untouched. A window asked for 2560x464 at (0, 928) on a 150%
+    display therefore appears 3840x696 at (0, 928): right place, half
+    again too big, hanging off the bottom of the screen.
+
+    So the SIZE passed to create_window has to be pre-divided by this
+    factor and the POSITION must not be. GetScaleFactorForDevice(0) is
+    deliberately the same call pywebview itself uses internally to
+    correct coordinates, so the two agree; device 0 is the primary
+    display, which is the right answer here because pywebview only
+    calls SetProcessDPIAware() (system DPI awareness, not per-monitor),
+    meaning Windows reports every monitor in the primary's scale
+    regardless of each monitor's own setting.
+    """
+    if TRANSLATION_DPI_SCALE_OVERRIDE is not None:
+        return float(TRANSLATION_DPI_SCALE_OVERRIDE)
+
+    import platform as _platform
+
+    if _platform.system() != "Windows":
+        return 1.0
+
+    import ctypes
+
+    try:
+        scale = ctypes.windll.shcore.GetScaleFactorForDevice(0) / 100.0
+        if scale > 0:
+            return scale
+    except Exception:  # noqa: BLE001 - shcore is Windows 8.1+; older builds fall through
+        pass
+    try:
+        # Windows 10 1607+. Falls back again to 1.0 below if missing,
+        # which just means the window is sized as if at 100% scaling.
+        return ctypes.windll.user32.GetDpiForSystem() / 96.0
+    except Exception:  # noqa: BLE001
+        return 1.0
+
+
+def _screen_rects():
+    """
+    _screen_rects()
+    Usage: returns a list of (x, y, width, height) tuples, one per
+    connected display, in the order pywebview reports them (index 0 is
+    primary). Called by _work_area_for_window(); not useful alone.
+
+    pywebview's Screen object exposes only .width/.height plus a
+    platform-specific .frame — there is no portable .x/.y — so
+    multi-monitor origins and the taskbar inset can only be read out
+    of .frame, whose shape differs per backend: a WinForms
+    WorkingArea Rectangle (.X/.Y/.Width/.Height) on Windows, a
+    Gdk.Rectangle (.x/.y/.width/.height) on GTK. Both casings are
+    tried; anything unrecognized falls back to .width/.height at
+    origin (0, 0).
+
+    NOTE: webview.screens must be read, never called. It is a
+    proxy_tools Proxy, whose __call__ forwards to the proxied list —
+    so callable() reports True but calling it raises
+    "\'list\' object is not callable". A guard of the form
+    `if callable(screens): screens = screens()` looks defensive and is
+    in fact the bug. list() is safe: Proxy forwards __iter__.
+    """
+    try:
+        screens = list(webview.screens)
+    except Exception as exc:  # noqa: BLE001 - a display query must never block opening the window
+        print(f"[TRANSLATION] could not query screens: {exc!r}", flush=True)
+        return []
+
+    rects = []
+    for screen in screens:
+        frame = getattr(screen, "frame", None)
+        rect = None
+        if TRANSLATION_USE_WORK_AREA and frame is not None:
+            for xa, ya, wa, ha in (("X", "Y", "Width", "Height"), ("x", "y", "width", "height")):
+                if all(hasattr(frame, a) for a in (xa, ya, wa, ha)):
+                    rect = (int(getattr(frame, xa)), int(getattr(frame, ya)),
+                            int(getattr(frame, wa)), int(getattr(frame, ha)))
+                    break
+        if rect is None:
+            rect = (0, 0, int(screen.width), int(screen.height))
+        rects.append(rect)
+    return rects
+
+
+def _work_area_for_window(window) -> tuple:
+    """
+    _work_area_for_window(window)
+    Usage: pass the MAIN app window to get the (x, y, width, height)
+    usable area of the display it is currently sitting on, so the
+    Translation window opens on the same monitor the user is working
+    on rather than always on the primary.
+
+    Which display that is has to be worked out by hit-testing the main
+    window's own centre point against each screen rectangle: pywebview
+    exposes no "which screen is this window on" call, and its Screen
+    objects carry no coordinates of their own outside .frame. The
+    CENTRE is tested rather than the top-left corner because a
+    maximized or slightly off-screen window can have a corner sitting
+    on a neighbouring display, or at negative coordinates, while its
+    body is plainly on one monitor.
+
+    Falls back to the primary display if the window position can\'t be
+    read or lands outside every reported screen, and to a 1920x1080
+    origin if pywebview reports no displays at all — so a geometry
+    calculation can never divide by nothing.
+    """
+    rects = _screen_rects()
+    if not rects:
+        print("[TRANSLATION] no screens reported; falling back to 1920x1080", flush=True)
+        return 0, 0, 1920, 1080
+
+    try:
+        cx = window.x + window.width // 2
+        cy = window.y + window.height // 2
+    except Exception as exc:  # noqa: BLE001 - position unreadable; primary is a fine default
+        print(f"[TRANSLATION] could not read main window position ({exc!r}); using primary display", flush=True)
+        return rects[0]
+
+    for index, (rx, ry, rw, rh) in enumerate(rects):
+        if rx <= cx < rx + rw and ry <= cy < ry + rh:
+            if index != 0:
+                print(f"[TRANSLATION] main window is on display {index + 1} of {len(rects)}", flush=True)
+            return rx, ry, rw, rh
+
+    print(
+        f"[TRANSLATION] main window centre ({cx},{cy}) matched no display; using primary",
+        flush=True,
+    )
+    return rects[0]
+
+
+def _bottom_strip_geometry(window):
+    """
+    _bottom_strip_geometry(window)
+    Usage: pass the MAIN app window; returns
+    (x, y, width, height, create_width, create_height, scale) for
+    the Translation window. Called by Api.open_translation_window().
+
+    The first four are the REAL pixel geometry wanted on screen: full
+    usable width of whichever display the main window is on,
+    1/TRANSLATION_SCREEN_DIVISIONS of its usable height, pinned to the
+    bottom edge. The last two are the same size pre-divided by the
+    display scaling, because that is what has to be handed to
+    create_window to actually get it — see _display_scale().
+
+    Recomputed on every open rather than cached, so moving the app to
+    a second monitor, unplugging a projector, or changing resolution
+    between openings is picked up without relaunching.
+
+    The height is floor-divided and y is derived by subtracting that
+    height from the bottom edge rather than by multiplying
+    (2/3 * height) — otherwise integer rounding leaves a 1-2px gap of
+    desktop showing along the very bottom on heights that don\'t divide
+    evenly by 3, e.g. 768 or 1050.
+    """
+    area_x, area_y, area_w, area_h = _work_area_for_window(window)
+
+    width = area_w
+    height = int(area_h / TRANSLATION_SCREEN_DIVISIONS)
+    x = area_x
+    y = area_y + area_h - height  # bottom edge of the usable area, minus the strip
+
+    scale = _display_scale()
+    create_width = int(round(width / scale))
+    create_height = int(round(height / scale))
+
+    print(
+        f"[TRANSLATION] work area {area_w}x{area_h} at ({area_x},{area_y}), scaling {scale:g}x "
+        f"-> bottom 1/{TRANSLATION_SCREEN_DIVISIONS} strip {width}x{height} at ({x},{y}) "
+        f"(requesting {create_width}x{create_height})",
+        flush=True,
+    )
+    return x, y, width, height, create_width, create_height, scale
+
+
+# --- Exact window placement (Windows) ----------------------------
+# Everything above computes WHERE the strip should go. Getting a
+# window to actually land there is a separate problem, because
+# pywebview's create_window does not document — and does not use —
+# one consistent unit for geometry on Windows. Observed on a 2560x1440
+# display at 150% scaling: a window asked for at (0, 912) sized
+# 1707x304 came out the right SIZE but with its top edge at 1368,
+# i.e. exactly on the bottom edge of the work area, entirely below the
+# visible desktop. It existed, it rendered, its JavaScript ran and
+# reported a correct width — it just wasn't on screen.
+#
+# So the position is not argued with; it is set afterwards with
+# SetWindowPos, which takes real screen pixels and applies no scaling
+# of its own. That is the one call in this whole path whose units are
+# unambiguous. GetWindowRect then reads back where the window
+# genuinely ended up, so "is it off-screen?" is never a guess again.
+#
+# Windows-only, and entirely optional: if any of it fails the window
+# keeps whatever geometry create_window gave it, exactly as before.
+
+
+def _force_window_rect(title: str, x: int, y: int, width: int, height: int) -> bool:
+    """
+    _force_window_rect(title, x, y, width, height)
+    Usage: called from Api._apply_translation_geometry() once the
+    Translation window has loaded. Moves and resizes the window titled
+    `title` belonging to THIS process to exactly the given screen
+    pixels, and logs where it actually landed. Returns True if the
+    window was found and positioned.
+
+    Matching is by title AND process id: FindWindow on a title as
+    generic as "Translation" could just as easily grab an unrelated
+    application's window, and moving a stranger's window off to the
+    bottom of the screen would be a genuinely bad bug. Comparing
+    GetWindowThreadProcessId against os.getpid() makes that
+    impossible.
+
+    argtypes are declared explicitly for the same reason
+    window_capture.py declares them for PrintWindow: without them,
+    ctypes marshals handles as 32-bit ints, which silently truncates
+    an HWND on 64-bit Windows and corrupts the call rather than
+    failing loudly.
+    """
+    import ctypes
+    import os
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.SetWindowPos.argtypes = [
+        wintypes.HWND, wintypes.HWND,
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        wintypes.UINT,
+    ]
+    user32.SetWindowPos.restype = wintypes.BOOL
+    user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+
+    own_pid = os.getpid()
+    found = []
+
+    WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def _enum(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length == 0:
+            return True
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buffer, length + 1)
+        if buffer.value != title:
+            return True
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value == own_pid:
+            found.append(hwnd)
+            return False  # stop enumerating
+        return True
+
+    user32.EnumWindows(WNDENUMPROC(_enum), 0)
+
+    if not found:
+        print(f"[TRANSLATION] no window titled {title!r} owned by this process; leaving geometry alone", flush=True)
+        return False
+
+    hwnd = found[0]
+
+    before = wintypes.RECT()
+    user32.GetWindowRect(hwnd, ctypes.byref(before))
+
+    SWP_NOZORDER = 0x0004
+    SWP_SHOWWINDOW = 0x0040
+    user32.SetWindowPos(hwnd, None, x, y, width, height, SWP_NOZORDER | SWP_SHOWWINDOW)
+
+    after = wintypes.RECT()
+    user32.GetWindowRect(hwnd, ctypes.byref(after))
+
+    print(
+        f"[TRANSLATION] placement: was ({before.left},{before.top})-({before.right},{before.bottom}) "
+        f"-> now ({after.left},{after.top})-({after.right},{after.bottom}) "
+        f"[wanted ({x},{y}) {width}x{height}]",
+        flush=True,
+    )
+    return True
+
+
 def _log_click(func):
     """
     _log_click(func)
@@ -88,6 +432,11 @@ class Api:
         # sync instead of showing "Waiting for speech…" until the next
         # result arrives. None until the first result of this run.
         self._last_subtitle: Optional[str] = None
+        # (x, y, width, height) in REAL pixels most recently wanted for
+        # the Translation window, kept so report_translation_geometry()
+        # can compare it against what the window actually became, and
+        # correct it. None until the first open.
+        self._target_translation_geometry: Optional[tuple] = None
         self._capture_stream = None
         self._logged_first_push = False
         self._logged_no_window_warning = False
@@ -542,13 +891,16 @@ class Api:
         Bound to the stage's bottom-right "Full Screen" button
         (id="maximizeBtn" in index.html). Does two things, in this
         order:
-          1. opens a second, full-screen window titled "Translation"
-             (translation.html) that shows nothing but the live
-             captions, mirrored from the same _push_result() that
-             feeds the main stage;
+          1. opens a second window titled "Translation", sized and
+             positioned to the BOTTOM THIRD of the display (full
+             width), showing nothing but the live captions, mirrored
+             from the same _push_result() that feeds the main stage;
           2. minimizes the main window down to the OS taskbar, so the
-             control UI is out of the way while that full-screen
-             caption display is up.
+             control UI is out of the way and whatever the user is
+             actually presenting occupies the upper two thirds.
+
+        The strip is measured from the display at open time, not
+        hardcoded — see _bottom_strip_geometry() above.
 
         Order matters: the new window is created BEFORE the main one
         is minimized. Minimizing first tends to hand focus to whatever
@@ -558,9 +910,9 @@ class Api:
 
         view_settings mirrors whatever Caption Style / Display / Text
         Color is currently active on the main stage and is passed
-        through as query-string params, so the full-screen window opens
-        matching rather than resetting to defaults (see
-        translation.html's applyStyleFromParams()).
+        through as query-string params, so the window opens matching
+        rather than resetting to defaults (see translation.html's
+        applyStyleFromParams()).
 
         No-ops on the create step if a Translation window is already
         open — only one at a time. No-ops entirely if called before
@@ -571,6 +923,8 @@ class Api:
 
         if self._translation_window is None:
             view_settings = view_settings or {}
+            x, y, width, height, create_width, create_height, scale = _bottom_strip_geometry(self._window)
+            self._target_translation_geometry = (x, y, width, height)
             query = urlencode({
                 "position": view_settings.get("position", "bottom"),
                 "appearance": view_settings.get("appearance", "dark"),
@@ -582,16 +936,177 @@ class Api:
                 "Translation",
                 f"translation.html?{query}",
                 js_api=self,
-                width=1280,
-                height=720,
-                fullscreen=True,
+                # Every one of these is a best-effort STARTING point
+                # only — the real geometry is forced with SetWindowPos
+                # once the window loads (see
+                # _apply_translation_geometry). Position is pre-scaled
+                # the same way size is, because the evidence says
+                # WinForms scales both: an unscaled y on a 150%
+                # display put the window's top edge exactly on the
+                # bottom of the work area, off-screen. Pre-scaling at
+                # worst puts it somewhere visible and wrong for the
+                # ~200ms before the correction lands, instead of
+                # somewhere invisible.
+                x=int(round(x / scale)),
+                y=int(round(y / scale)),
+                width=create_width,
+                height=create_height,
+                # Deliberately NOT fullscreen: the whole point of the
+                # bottom third is that the upper two thirds stay
+                # visible. Resizable so the strip can still be nudged
+                # by hand on an odd display; min_size is well under
+                # any third of a real screen so it never fights the
+                # computed geometry (see main.py's note on min_size
+                # being a permanent floor pywebview enforces).
+                resizable=True,
+                min_size=(320, 100),
+                # No title bar. A caption strip sitting over someone's
+                # slides shouldn't announce itself with window chrome,
+                # and the ~30px the title bar occupied was a visible
+                # slice out of a strip only a few hundred px tall.
+                #
+                # This removes the OS close button, so translation.html
+                # has to carry its own way out — it does: the X in the
+                # corner and the Esc key, both routed through
+                # close_translation_window().
+                frameless=TRANSLATION_FRAMELESS,
+                # Transparent backdrop, so only the caption panel is
+                # drawn and whatever is behind shows through the
+                # margin around it. On Windows pywebview implements
+                # this by chroma-keying the form on pure red plus
+                # setting the WebView2 control's DefaultBackgroundColor
+                # to transparent — see translation.html's note on why
+                # the page must not paint an opaque background.
+                #
+                # frameless is applied before transparency inside
+                # pywebview (FormBorderStyle first, then
+                # TransparencyKey), which is the order WinForms wants,
+                # so these two are safe to request together.
+                transparent=TRANSLATION_TRANSPARENT,
+                # pywebview's easy_drag attaches a mousedown handler to
+                # the whole window and moves it on any subsequent mouse
+                # movement. On a frameless window that is normally how
+                # you drag it, but here it would fight the exact
+                # placement _apply_translation_geometry() just did —
+                # and because it fires on the close button too, a 1px
+                # jitter while clicking X would shove the strip out of
+                # position. The window is meant to be pinned; reopening
+                # it recomputes the geometry anyway.
+                easy_drag=False,
                 background_color="#0b0e14",
             )
             self._translation_window.events.closed += self._on_translation_closed
-            self._translation_window.events.loaded += self._push_last_subtitle_to_translation
+            self._translation_window.events.loaded += self._on_translation_loaded
 
         self._window.minimize()
         return {"ok": True}
+
+    def report_translation_geometry(self, css_width, css_height, device_pixel_ratio):
+        """
+        report_translation_geometry(css_width, css_height, device_pixel_ratio)
+        Usage (JS, from translation.html): called once on load with
+        window.innerWidth, window.innerHeight and
+        window.devicePixelRatio. Pure logging — it corrects nothing.
+
+        _apply_translation_geometry() is what actually enforces the
+        window rectangle, and its SetWindowPos readback is the
+        authoritative answer on where the window is. This is the view
+        from the other side: what the WEB CONTENT thinks it has to
+        draw in. The two together separate the two failure modes that
+        otherwise look identical from a console log — a window that is
+        the wrong size, versus a window that is the right size in the
+        wrong place.
+
+        Nothing here resizes, deliberately: this fires on a JS timer
+        that can overlap the placement thread, and a corrective resize
+        racing SetWindowPos would be a coin flip over which one wins.
+
+        Compares WIDTH rather than height. That used to be because the
+        title bar made height differ by ~30px even when correct; the
+        window is frameless now, so both are clean, but width remains
+        the better signal — it is the larger number, so a proportional
+        scaling error shows up in it most clearly.
+        """
+        geometry = self._target_translation_geometry
+        if not geometry:
+            return {"ok": False}
+
+        try:
+            ratio = float(device_pixel_ratio) or 1.0
+            actual_width = float(css_width) * ratio
+        except (TypeError, ValueError):
+            return {"ok": False}
+
+        target_width = geometry[2]
+        if not target_width:
+            return {"ok": False}
+
+        drift = actual_width / target_width
+        verdict = "matches" if abs(drift - 1.0) <= 0.15 else "MISMATCH"
+        print(
+            f"[TRANSLATION] content size: {css_width}css x {ratio}dpr = {actual_width:.0f}px "
+            f"vs {target_width}px wanted ({verdict}, ratio {drift:.2f})",
+            flush=True,
+        )
+        return {"ok": True}
+
+    def _on_translation_loaded(self):
+        """
+        _on_translation_loaded()
+        Usage: internal — bound to the Translation window's `loaded`
+        event, not called directly. Two jobs, in order: put the window
+        exactly where it belongs, then replay the last caption into it.
+
+        Placement happens here rather than at creation because the
+        window has to exist and be visible before SetWindowPos can
+        find it by title, and because create_window's own geometry
+        arguments cannot be relied on (see _force_window_rect).
+        Placement runs first so the window is never briefly readable
+        in the wrong place.
+        """
+        self._apply_translation_geometry()
+        self._push_last_subtitle_to_translation()
+
+    def _apply_translation_geometry(self):
+        """
+        _apply_translation_geometry()
+        Usage: internal — forces the Translation window to the exact
+        screen rectangle _bottom_strip_geometry() worked out, using
+        Win32 SetWindowPos rather than pywebview's own geometry calls.
+        Called once per open from _on_translation_loaded().
+
+        No-ops off Windows, where pywebview's create_window geometry is
+        used as-is; the deliberate result is that a developer running
+        this on macOS or Linux gets an approximately-right window
+        rather than an exception.
+
+        Retries briefly because `loaded` fires on browser navigation,
+        which is not a guarantee that the OS-level window has been
+        created and made visible yet — and _force_window_rect can only
+        find a visible window. Runs on its own short-lived thread so a
+        window that never appears costs a second of a background
+        thread rather than blocking the event dispatcher.
+        """
+        import platform as _platform
+
+        geometry = self._target_translation_geometry
+        if geometry is None or _platform.system() != "Windows":
+            return
+
+        x, y, width, height = geometry
+
+        def _place():
+            for _ in range(10):
+                try:
+                    if _force_window_rect("Translation", x, y, width, height):
+                        return
+                except Exception as exc:  # noqa: BLE001 - placement is cosmetic; never take the app down for it
+                    print(f"[TRANSLATION] placement failed: {exc!r}", flush=True)
+                    return
+                time.sleep(0.1)
+            print("[TRANSLATION] gave up looking for the window to place", flush=True)
+
+        threading.Thread(target=_place, daemon=True).start()
 
     def _push_to_translation_window(self, script: str) -> None:
         """
