@@ -31,12 +31,19 @@
   applied on load by applyStyleFromParams() below.
 -->
 <style>
-  /* MUST stay transparent. api.py opens this window with
-     transparent=True, which on Windows makes pywebview chroma-key the
-     window on pure red and set the WebView2 control's
-     DefaultBackgroundColor to transparent. An opaque background here
-     would simply paint over that and the window would be a solid
-     block again. Only the caption panel below draws a background. */
+  /* THE KEY COLOUR — must stay exactly rgb(1,2,3), matching
+     TRANSLATION_KEY_COLOR in api.py, which punches every pixel of this
+     colour out of the window with SetLayeredWindowAttributes (see
+     _apply_color_key).
+
+     This is painted OPAQUELY and removed afterwards by Windows. It is
+     not CSS transparency. Writing `transparent` here instead leaves
+     WebView2 compositing onto whatever the form's background happens
+     to be, which is how this window previously came out a solid
+     (240,240,240) grey.
+
+     If these two values ever drift apart nothing errors — the window
+     just renders a flat near-black rectangle. */
   html, body {
     margin: 0;
     padding: 0;
@@ -44,7 +51,7 @@
     height: 100%;
     overflow: hidden;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    background: transparent;
+    background: rgb(1, 2, 3);
     color: #ffffff;
   }
 
@@ -63,7 +70,7 @@
        this margin is transparent, so it is the only part of the
        window the desktop shows through. */
     padding: 6px;
-    background: transparent;
+    background: rgb(1, 2, 3);
   }
 
   /* The panel fills the window rather than hugging its text, so the
@@ -83,8 +90,22 @@
        close button in the corner. */
     padding: clamp(10px, 3%, 24px) clamp(48px, 5%, 64px) clamp(10px, 3%, 24px) clamp(16px, 3%, 40px);
     border-radius: 10px;
-    background: rgba(11, 14, 20, 0.97);
-    border: 1px solid rgba(232, 183, 58, 0.35);
+    /* No background and no border by default, so the key colour
+       painted by .screen shows through here and is punched out.
+
+       Transparency in this window is BINARY: Windows removes only
+       pixels that are EXACTLY the key colour. A partly-transparent
+       panel does not blend with the desktop, it blends with the key
+       colour and stays opaque as a near-black block. So nothing drawn
+       over the see-through area may use fractional alpha, an opacity
+       below 1, or a blurred shadow — which is why the text outline
+       below is a hard opaque shadow and the close button is dimmed by
+       colour rather than opacity.
+
+       .light and .custom deliberately opt back into a solid panel;
+       being fully opaque, they never expose the key colour at all. */
+    background: none;
+    border: none;
   }
   .screen.pos-top    .box { justify-content: flex-start; }
   .screen.pos-center .box { justify-content: center; }
@@ -105,13 +126,41 @@
 
   /* Background themes — mirrors index.html's
      .subtitle-box.dark/.light/.custom rules. */
+  /* Floating captions need their own contrast: with no panel behind
+     them the text can land on anything from a white slide to a busy
+     photo.
+
+     This is an 8-direction HARD outline, not a soft glow, and the
+     shadow colours are fully opaque with a blur radius of 0 — because
+     a blurred shadow's faded outer pixels are partly transparent, and
+     partial transparency over a chroma-keyed window composites
+     against the key colour instead of the desktop. A soft halo would
+     therefore render as a red glow around every word. An opaque
+     outline has no partial pixels except the glyph's own
+     antialiasing. Only applied to the transparent theme — .light and
+     .custom have a solid panel doing this job already. */
+  .box.dark.text-white .original,
+  .box.dark.text-white .translated {
+    text-shadow:
+      -2px -2px 0 #000, 0 -2px 0 #000, 2px -2px 0 #000,
+      -2px  0   0 #000,               2px  0   0 #000,
+      -2px  2px 0 #000, 0  2px 0 #000, 2px  2px 0 #000;
+  }
+  .box.dark.text-black .original,
+  .box.dark.text-black .translated {
+    text-shadow:
+      -2px -2px 0 #fff, 0 -2px 0 #fff, 2px -2px 0 #fff,
+      -2px  0   0 #fff,               2px  0   0 #fff,
+      -2px  2px 0 #fff, 0  2px 0 #fff, 2px  2px 0 #fff;
+  }
+
   .box.light {
     background: #ffffff;
-    border-color: rgba(0,0,0,0.15);
+    border: 1px solid rgba(0,0,0,0.15);
   }
   .box.custom {
     background: #10151e;
-    border-color: rgba(232,183,58,0.35);
+    border: 1px solid rgba(232,183,58,0.35);
   }
 
   /* Text color is deliberately independent of the background theme,
@@ -121,6 +170,13 @@
   .box.text-white { color: #ffffff; }
   .box.text-black { color: #111111; }
 
+  /* Interim (not yet finalized) results are dimmed with a solid
+     colour rather than opacity, for the same reason as everything
+     else on this page: a half-transparent line over a chroma-keyed
+     window reads as red, not faded. */
+  .box.text-white .interim { color: #c4cad4; }
+  .box.text-black .interim { color: #4d4d4d; }
+
   .close-btn {
     position: absolute;
     top: 14px;
@@ -128,24 +184,27 @@
     width: 34px;
     height: 34px;
     border-radius: 50%;
-    background: rgba(255,255,255,0.06);
-    border: 1px solid rgba(255,255,255,0.10);
-    color: #ffffff;
+    /* Solid, not translucent: anything semi-transparent over the
+       keyed-out area composites against the key colour and comes out
+       tinted red rather than see-through. */
+    background: #1b2029;
+    border: 1px solid #2b323f;
+    /* Subdued via COLOUR, never via opacity — a half-transparent
+       button over the keyed-out area would come out tinted red rather
+       than faded. Kept clearly visible regardless: with the title bar
+       gone, this and the Esc key are the only ways to close the
+       window. */
+    color: #8a919e;
     font-size: 17px;
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
     z-index: 5;
-    /* Subdued so it doesn't compete with the captions, but no longer
-       nearly-invisible: with the title bar gone this and the Esc key
-       are the only ways to close the window. */
-    opacity: 0.5;
-    transition: opacity 0.15s ease;
+    transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
   }
   .close-btn:hover {
-    opacity: 1;
-    background: rgba(232,183,58,0.14);
+    background: #3a3320;
     border-color: #e8b73a;
     color: #e8b73a;
   }
@@ -158,15 +217,17 @@
     font-size: 12px;
     letter-spacing: 0.06em;
     text-transform: uppercase;
-    color: rgba(255,255,255,0.35);
-    transition: opacity 0.4s ease;
+    color: #9aa0ab;
   }
-  .hint.gone { opacity: 0; }
+  /* display, not a fade: an opacity transition would spend its whole
+     duration partly transparent, which over a chroma-keyed window
+     means visibly red rather than fading out. */
+  .hint.gone { display: none; }
   .hint {
     /* Sits inside the panel now that the panel fills the window, so
        it needs to stay legible against it. */
     z-index: 6;
-    background: rgba(11, 14, 20, 0.6);
+    background: #12161f;
     padding: 3px 10px;
     border-radius: 999px;
   }
@@ -305,8 +366,9 @@
   window.updateSubtitle = function (original, translated, isFinal) {
     origEl.textContent = original || '';
     transEl.textContent = translated || '';
-    origEl.style.opacity = isFinal ? '1' : '0.75';
-    transEl.style.opacity = isFinal ? '1' : '0.75';
+    // classList, not style.opacity — see the .interim CSS rule.
+    origEl.classList.toggle('interim', !isFinal);
+    transEl.classList.toggle('interim', !isFinal);
   };
 
   // Recompute the scaled font size if the window is resized (e.g. the

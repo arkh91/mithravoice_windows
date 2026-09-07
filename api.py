@@ -79,22 +79,32 @@ TRANSLATION_FRAMELESS = True
 # Draw only the caption panel, letting whatever is behind show through
 # the margin around it.
 #
-# Windows transparency here is not alpha blending, it is CHROMA KEYING:
-# pywebview sets the form's TransparencyKey to pure red (255,0,0) and
-# the WebView2 control's DefaultBackgroundColor to transparent, so any
-# pixel that ends up pure red is punched out of the window entirely.
-# Two consequences worth knowing:
-#   - Those punched-out regions are CLICK-THROUGH. Clicks land on the
-#     application behind instead of on this window. Harmless here
-#     because the caption panel covers nearly the whole strip.
-#   - Nothing in the UI may be pure red or it will vanish. The palette
-#     is dark navy and gold, so this is not currently a constraint,
-#     but it is one to remember before adding a red error state.
-#
-# Set False if the window comes up red or white instead of
-# transparent, which would mean this WebView2 runtime doesn't support
-# it — the window then just draws its dark background as before.
+# This does NOT use pywebview's transparent=True. That path sets the
+# form's BackColor and TransparencyKey to pure red and relies on
+# WebView2 honouring DefaultBackgroundColor; on a real 2560x1440
+# Windows 11 machine at 150% it produced a window whose background
+# measured exactly (240,240,240) — SystemColors.Control, the untouched
+# WinForms default — meaning neither branch of that code had taken
+# effect and WebView2 was compositing onto plain grey. Rather than
+# depend on it, the colour key is applied here directly with
+# SetLayeredWindowAttributes, on the same window handle already looked
+# up for positioning. See _apply_color_key().
 TRANSLATION_TRANSPARENT = True
+
+# The colour punched out of the window. A near-black nothing else
+# uses, rather than the conventional magenta or red, for two reasons:
+#   - If the key is ever NOT applied (an old Windows build, a failed
+#     call), the window falls back to showing this colour flat. A
+#     near-black reads as the app's normal dark background; magenta
+#     would be a screenful of eye-searing pink.
+#   - The caption text is outlined in pure black (#000). Antialiased
+#     pixels along that outline blend toward the key colour, and
+#     blending black into near-black is invisible. Blending black into
+#     magenta would fringe every glyph.
+# This must stay in step with translation.html's page background, and
+# nothing else in that file may use this exact value.
+TRANSLATION_KEY_COLOR = (1, 2, 3)
+TRANSLATION_KEY_COLOR_HEX = "#010203"
 
 def _display_scale() -> float:
     """
@@ -303,6 +313,69 @@ def _bottom_strip_geometry(window):
 # keeps whatever geometry create_window gave it, exactly as before.
 
 
+def _apply_color_key(hwnd) -> bool:
+    """
+    _apply_color_key(hwnd)
+    Usage: called from _force_window_rect() once the Translation
+    window has been found, before it is positioned. Makes every pixel
+    of TRANSLATION_KEY_COLOR fully transparent and click-through,
+    leaving everything else fully opaque. Returns True on success.
+
+    This replaces pywebview's transparent=True, which measurably did
+    not work on the target machine. Doing it here is two calls: add
+    WS_EX_LAYERED to the window's extended style, then
+    SetLayeredWindowAttributes with LWA_COLORKEY. Windows then
+    composites the window itself, with no dependency on what WebView2
+    does or doesn't honour — WebView2 paints the key colour opaquely,
+    exactly as it would any other colour, and the desktop window
+    manager removes it afterwards. That is the whole reason this is
+    more reliable than asking the browser engine for alpha.
+
+    Note the COLORREF byte order: Win32 packs it as 0x00BBGGRR, the
+    reverse of the RRGGBB the same colour is written as in CSS. Getting
+    this backwards keys out a different colour than the page paints and
+    the window looks completely unchanged — a silent failure, hence
+    spelling it out.
+
+    The alpha argument is 0 and is ignored: it applies only under
+    LWA_ALPHA, which is deliberately not passed. Passing LWA_ALPHA too
+    would make the WHOLE window uniformly translucent, caption text
+    included, which is not what is wanted.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+
+    GWL_EXSTYLE = -20
+    WS_EX_LAYERED = 0x00080000
+    LWA_COLORKEY = 0x00000001
+
+    user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.GetWindowLongW.restype = ctypes.c_long
+    user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+    user32.SetWindowLongW.restype = ctypes.c_long
+    user32.SetLayeredWindowAttributes.argtypes = [
+        wintypes.HWND, wintypes.COLORREF, ctypes.c_ubyte, wintypes.DWORD
+    ]
+    user32.SetLayeredWindowAttributes.restype = wintypes.BOOL
+
+    red, green, blue = TRANSLATION_KEY_COLOR
+    colorref = red | (green << 8) | (blue << 16)  # 0x00BBGGRR, not RRGGBB
+
+    style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+    if not style & WS_EX_LAYERED:
+        user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED)
+
+    ok = bool(user32.SetLayeredWindowAttributes(hwnd, colorref, 0, LWA_COLORKEY))
+    print(
+        f"[TRANSLATION] colour key rgb{TRANSLATION_KEY_COLOR} "
+        f"(COLORREF 0x{colorref:06x}): {'applied' if ok else 'FAILED — window will show a flat ' + TRANSLATION_KEY_COLOR_HEX}",
+        flush=True,
+    )
+    return ok
+
+
 def _force_window_rect(title: str, x: int, y: int, width: int, height: int) -> bool:
     """
     _force_window_rect(title, x, y, width, height)
@@ -375,9 +448,16 @@ def _force_window_rect(title: str, x: int, y: int, width: int, height: int) -> b
     before = wintypes.RECT()
     user32.GetWindowRect(hwnd, ctypes.byref(before))
 
+    if TRANSLATION_TRANSPARENT:
+        _apply_color_key(hwnd)
+
     SWP_NOZORDER = 0x0004
     SWP_SHOWWINDOW = 0x0040
-    user32.SetWindowPos(hwnd, None, x, y, width, height, SWP_NOZORDER | SWP_SHOWWINDOW)
+    SWP_FRAMECHANGED = 0x0020
+    user32.SetWindowPos(
+        hwnd, None, x, y, width, height,
+        SWP_NOZORDER | SWP_SHOWWINDOW | SWP_FRAMECHANGED,
+    )
 
     after = wintypes.RECT()
     user32.GetWindowRect(hwnd, ctypes.byref(after))
@@ -970,19 +1050,15 @@ class Api:
                 # corner and the Esc key, both routed through
                 # close_translation_window().
                 frameless=TRANSLATION_FRAMELESS,
-                # Transparent backdrop, so only the caption panel is
-                # drawn and whatever is behind shows through the
-                # margin around it. On Windows pywebview implements
-                # this by chroma-keying the form on pure red plus
-                # setting the WebView2 control's DefaultBackgroundColor
-                # to transparent — see translation.html's note on why
-                # the page must not paint an opaque background.
-                #
-                # frameless is applied before transparency inside
-                # pywebview (FormBorderStyle first, then
-                # TransparencyKey), which is the order WinForms wants,
-                # so these two are safe to request together.
-                transparent=TRANSLATION_TRANSPARENT,
+                # Deliberately transparent=False. pywebview's own
+                # transparency measurably did not work here (see the
+                # note on TRANSLATION_TRANSPARENT); _apply_color_key()
+                # does it instead, once the window exists.
+                # background_color is set to the key colour so that any
+                # region the WebView2 control does not paint is keyed
+                # out too, rather than showing as a stripe of some
+                # other colour along an edge.
+                transparent=False,
                 # pywebview's easy_drag attaches a mousedown handler to
                 # the whole window and moves it on any subsequent mouse
                 # movement. On a frameless window that is normally how
@@ -993,7 +1069,7 @@ class Api:
                 # position. The window is meant to be pinned; reopening
                 # it recomputes the geometry anyway.
                 easy_drag=False,
-                background_color="#0b0e14",
+                background_color=TRANSLATION_KEY_COLOR_HEX,
             )
             self._translation_window.events.closed += self._on_translation_closed
             self._translation_window.events.loaded += self._on_translation_loaded
