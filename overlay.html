@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MithraVoice Captions</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #0b0e14;
+    color: #ffffff;
+  }
+
+  .box {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 20px 58px 20px 32px;
+    background: rgba(11, 14, 20, 0.97);
+    border: 1px solid rgba(232, 183, 58, 0.35);
+  }
+
+  .original,
+  .translated {
+    max-width: 95%;
+  }
+
+  .original { line-height: 1.45; }
+
+  .translated {
+    direction: rtl;
+    line-height: 1.7;
+    margin-top: 10px;
+  }
+
+  .close-btn {
+    position: absolute;
+    top: 8px;
+    right: 10px;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.10);
+    color: #ffffff;
+    font-size: 15px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .close-btn:hover {
+    background: rgba(232,183,58,0.14);
+    border-color: #e8b73a;
+    color: #e8b73a;
+  }
+
+  .box.light {
+    background: #ffffff;
+    color: #111111;
+    border-color: rgba(0,0,0,0.15);
+  }
+
+  .box.custom {
+    background: #10151e;
+    color: #ffffff;
+    border-color: rgba(232,183,58,0.35);
+  }
+</style>
+</head>
+<body>
+  <div class="box dark" id="box">
+    <button class="close-btn" id="closeBtn"
+            title="Close captions and restore MithraVoice">✕</button>
+    <div class="original" id="orig">Waiting for speech…</div>
+    <div class="translated" id="trans"></div>
+  </div>
+
+<script>
+  const params = new URLSearchParams(location.search);
+  const box = document.getElementById('box');
+  const origEl = document.getElementById('orig');
+  const transEl = document.getElementById('trans');
+
+  function applyStyleFromParams() {
+    const appearance = params.get('appearance') || 'dark';
+    box.className = 'box ' +
+      (['dark', 'light', 'custom'].includes(appearance) ? appearance : 'dark');
+
+    const fontSize = Number(params.get('fontSize')) || 24;
+    origEl.style.fontSize = fontSize + 'px';
+    transEl.style.fontSize = fontSize + 'px';
+
+    const displayMode = params.get('displayMode') || 'both';
+    origEl.style.display =
+      (displayMode === 'translation') ? 'none' : 'block';
+    transEl.style.display =
+      (displayMode === 'original') ? 'none' : 'block';
+    transEl.style.marginTop =
+      (displayMode === 'both') ? '10px' : '0';
+  }
+
+  applyStyleFromParams();
+
+  document.getElementById('closeBtn').addEventListener('click', () => {
+    if (window.pywebview &&
+        window.pywebview.api &&
+        window.pywebview.api.close_caption_overlay) {
+      window.pywebview.api.close_caption_overlay();
+    }
+  });
+
+  // Receives the same live interim/final translation updates as the
+  // main application window.
+  window.updateSubtitle = function(original, translated, isFinal) {
+    origEl.textContent = original || '';
+    transEl.textContent = translated || '';
+  };
+</script>
+</body>
+</html>

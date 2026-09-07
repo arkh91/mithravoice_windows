@@ -1,0 +1,24 @@
+# App shell
+pywebview>=4.4.1
+
+# Audio capture
+sounddevice>=0.4.6
+numpy>=1.26.0
+
+# Online engine (primary)
+azure-cognitiveservices-speech>=1.34.0
+
+# Offline engine (fallback)
+faster-whisper>=1.0.1
+argostranslate>=1.9.6
+
+# Licensing
+pyjwt[crypto]>=2.8.0
+requests>=2.31.0
+
+# "Select App" window capture — Windows only. pywin32 is not installable
+# on macOS/Linux; api.py's list_open_windows/start_app_capture catch the
+# resulting ImportError and report the feature as unavailable rather than
+# crashing on other platforms.
+pywin32>=306; sys_platform == 'win32'
+Pillow>=10.0.0
