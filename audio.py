@@ -118,6 +118,31 @@ def list_input_devices() -> List[DeviceInfo]:
     ]
 
 
+def _design_lowpass_kernel(cutoff_ratio: float, num_taps: int = 63) -> np.ndarray:
+    """
+    _design_lowpass_kernel(cutoff_ratio, num_taps)
+    Usage: internal — called (and cached) once per distinct orig_sr by
+    _resample_mono() below. Builds a windowed-sinc FIR low-pass filter
+    with its cutoff at cutoff_ratio * Nyquist (cutoff_ratio is
+    target_sr / orig_sr, i.e. the new Nyquist expressed as a fraction
+    of the old one). Hamming-windowed sinc rather than a bare sinc so
+    the stopband actually attenuates instead of ringing — a short,
+    cheap FIR is plenty for speech-recognition input; this doesn't
+    need to be audiophile-grade.
+    """
+    if num_taps % 2 == 0:
+        num_taps += 1  # keep it symmetric around a center tap
+    n = np.arange(num_taps) - (num_taps - 1) / 2
+    sinc = np.sinc(cutoff_ratio * n)
+    window = np.hamming(num_taps)
+    kernel = (sinc * window).astype(np.float32)
+    kernel /= kernel.sum()  # unity gain at DC
+    return kernel
+
+
+_LOWPASS_KERNEL_CACHE: dict = {}  # orig_sr -> precomputed kernel, so _resample_mono() isn't redesigning a filter ~10x/sec
+
+
 def _resample_mono(samples: np.ndarray, orig_sr: float) -> np.ndarray:
     """
     _resample_mono(samples, orig_sr)
@@ -127,13 +152,36 @@ def _resample_mono(samples: np.ndarray, orig_sr: float) -> np.ndarray:
     start()'s docstring). Azure Speech SDK and faster-whisper both
     require exactly SAMPLE_RATE regardless of what the physical device
     natively captures at, so every chunk is converted here before
-    on_chunk ever sees it. Plain linear interpolation via np.interp
-    rather than pulling in scipy/resampy as a dependency — this is
-    fine for speech-recognition input (no professional audio-quality
-    bar to clear) and adds zero new packages to the PyInstaller build.
+    on_chunk ever sees it.
+
+    When downsampling (orig_sr > SAMPLE_RATE — the common case, e.g. a
+    headset that only offers 48kHz), first runs the signal through a
+    low-pass filter cut off at the new Nyquist frequency before
+    decimating. Skipping this step and going straight to linear
+    interpolation (the previous implementation) is a well-documented
+    source of aliasing: content above the new Nyquist folds back down
+    into the audible band as artifacts rather than being discarded.
+    Robust, well-resourced acoustic models (e.g. English) can shrug
+    that off; this was confirmed in practice to specifically corrupt
+    recognition of a less-resourced language (Persian) on the exact
+    same headset/pipeline where English kept working fine — the
+    symptom was garbled "guessed" transcriptions in one language only,
+    which is exactly what aliasing artifacts riding along with the
+    real signal would cause a speech model to mis-hear. Implemented as
+    a plain windowed-sinc FIR via np.convolve rather than
+    scipy/resampy, to add zero new packages to the PyInstaller build.
     """
     if samples.size == 0:
         return samples
+
+    if orig_sr > SAMPLE_RATE:
+        cutoff_ratio = SAMPLE_RATE / orig_sr
+        kernel = _LOWPASS_KERNEL_CACHE.get(orig_sr)
+        if kernel is None:
+            kernel = _design_lowpass_kernel(cutoff_ratio)
+            _LOWPASS_KERNEL_CACHE[orig_sr] = kernel
+        samples = np.convolve(samples, kernel, mode="same").astype(np.float32)
+
     duration = samples.shape[0] / orig_sr
     target_len = max(1, round(duration * SAMPLE_RATE))
     orig_positions = np.linspace(0, duration, num=samples.shape[0], endpoint=False)

@@ -52,9 +52,9 @@ from config import settings
 # live, its response is always authoritative and this table is never
 # consulted for any key/plan that got a real answer at least once.
 PLAN_INCLUDED_HOURS = {
-    "bronze": 10,
-    "silver": 25,
-    "gold": 40,
+    "online_bronze_monthly": 10,
+    "online_silver_monthly": 25,
+    "online_gold_monthly": 40,
 }
 
 
@@ -110,6 +110,27 @@ def _save_snapshot(snapshot: UsageSnapshot) -> None:
     pending_seconds.
     """
     _usage_cache_path().write_text(json.dumps(asdict(snapshot)))
+
+
+def clear_cached_usage() -> None:
+    """
+    clear_cached_usage()
+    Usage: call from api.py whenever the active license key changes —
+    a fresh activate_license() (new key) or deactivate_device() (this
+    device no longer holds any key). _usage_cache_path() is keyed
+    per-DEVICE, not per-key, since nothing about this module's file
+    name or contents ever recorded which key a cached snapshot
+    belonged to. Left uncleared, activating a brand-new key would
+    silently inherit whatever seconds_used/seconds_remaining the
+    PREVIOUS key last cached here, showing the new key's countdown as
+    however much time the old key happened to have left rather than
+    the new key's own fresh allowance — that mismatch is exactly what
+    this function exists to prevent. Safe to call even if there's no
+    cache file yet (e.g. first-ever activation on this device).
+    """
+    path = _usage_cache_path()
+    if path.exists():
+        path.unlink()
 
 
 def _local_fallback_snapshot(plan_code: Optional[str], seconds_delta: float) -> Optional[UsageSnapshot]:
@@ -178,6 +199,7 @@ def report_usage(token: Optional[str], seconds_delta: float, plan_code: Optional
     known at all).
     """
     if not token:
+        print("[usage] report_usage called with no cached license token — skipping the server and returning whatever's cached, if anything", flush=True)
         return get_cached_usage_snapshot()
 
     try:
@@ -188,7 +210,21 @@ def report_usage(token: Optional[str], seconds_delta: float, plan_code: Optional
         )
         resp.raise_for_status()
         data = resp.json()
-    except requests.RequestException:
+    except requests.RequestException as exc:
+        # Previously silent — this is the ONLY thing standing between
+        # "usage isn't reaching the DB" and knowing why: a genuinely
+        # unreachable server (DNS/connection/timeout) looks identical
+        # from the caller's side to a reachable server that rejected
+        # the request (401/403 bad token, 500 server bug), but they
+        # need very different fixes. exc.response is only set for the
+        # latter case (an HTTPError from raise_for_status()) — print
+        # its body too, since that's usually the actual detail message
+        # (e.g. {"detail": "revoked"} or a stack trace) FastAPI sent
+        # back, not just the generic status code.
+        detail = ""
+        if getattr(exc, "response", None) is not None:
+            detail = f" — server responded {exc.response.status_code}: {exc.response.text[:300]!r}"
+        print(f"[usage] report_usage to {settings.license_server_url}/v1/usage/report failed, falling back to local estimate: {exc!r}{detail}", flush=True)
         cached = get_cached_usage_snapshot()
         if cached is None:
             fallback = _local_fallback_snapshot(plan_code, seconds_delta)

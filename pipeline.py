@@ -80,6 +80,13 @@ class TranslationPipeline:
             engine.start(self._from_lang, self._to_lang, self._on_engine_result)
         except (AzureEngineError, Exception) as exc:  # noqa: BLE001 - any online failure triggers fallback
             if active_mode == "online" and self._mode == "auto":
+                # Print the real reason Azure failed BEFORE silently
+                # switching engines — without this, a fallback to
+                # offline is completely invisible in the console, and
+                # the only symptom is unexpectedly worse translation
+                # quality with no clue why (see the "(Offline)" badge
+                # in the UI for the same signal, less detail).
+                print(f"[pipeline] Azure engine failed to start, falling back to offline: {exc!r}")
                 engine = OfflineEngine()
                 active_mode = "offline"
                 engine.start(self._from_lang, self._to_lang, self._on_engine_result)
@@ -115,6 +122,9 @@ class TranslationPipeline:
             error = self._mic.drain_errors()
             if error is None:
                 continue
+            # Same visibility gap as _start_engine(): a mid-session
+            # drop to offline is otherwise silent in the console.
+            print(f"[pipeline] mic feed error while online, falling back to offline: {error!r}")
             if self._mode == "auto" and isinstance(self._engine, AzureEngine):
                 self._restart_on_offline()
 
@@ -172,6 +182,20 @@ class TranslationPipeline:
         """
         if self._mic is not None:
             self._mic.set_paused(paused)
+
+    @property
+    def is_online_active(self) -> bool:
+        """
+        is_online_active
+        Usage: `if pipeline.is_online_active: ...` — read-only check of
+        whether the currently active engine is AzureEngine (as opposed
+        to OfflineEngine, or no engine at all because no session is
+        running). api.py's set_paused() uses this to decide whether
+        resuming from pause should restart the online-usage clock
+        (see usage.py) — pausing/resuming must never start that clock
+        for an offline-only session.
+        """
+        return isinstance(self._engine, AzureEngine)
 
     def stop(self) -> None:
         """

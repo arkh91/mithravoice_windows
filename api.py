@@ -802,6 +802,32 @@ class Api:
             self._on_usage_exceeded()
         return self._usage_snapshot_to_dict(snapshot)
 
+    def _stop_online_tracking(self) -> Optional[dict]:
+        """
+        _stop_online_tracking()
+        Usage: internal — called when the online engine has stopped
+        actively consuming metered time RIGHT NOW (a pause), which is
+        different from _flush_online_usage()'s normal periodic job of
+        "report what's accrued so far, then keep the clock running for
+        the still-ongoing session" — that method resets
+        _online_started_at to the current time rather than clearing
+        it, which is correct for a mid-session checkpoint but WRONG
+        for a pause: left alone, the next periodic flush 20s later
+        would still report ~20 elapsed seconds even though nothing was
+        being sent to Azure that whole time. So this flushes (banking
+        whatever time genuinely elapsed up to the pause) and then
+        explicitly sets _online_started_at back to None afterward, so
+        no further elapsed time accrues until _start_online_tracking()
+        is called again on resume. Mirrors what _on_usage_exceeded()
+        already does for the same reason. Safe to call when nothing is
+        being tracked (delegates to _flush_online_usage()'s own no-op
+        guard).
+        """
+        result = self._flush_online_usage()
+        with self._usage_lock:
+            self._online_started_at = None
+        return result
+
     def _on_usage_exceeded(self) -> None:
         """
         _on_usage_exceeded()
@@ -922,8 +948,20 @@ class Api:
         the license gate again immediately after this call succeeds
         (see its deactivateDeviceBtn click handler) rather than
         waiting for a relaunch.
+
+        Also clears the cached usage snapshot (see usage.py's
+        clear_cached_usage()) and this instance's in-memory usage
+        state — see activate_license()'s docstring for why leaving
+        either behind would corrupt whatever key gets activated next
+        on this device, including within this same running process if
+        the user immediately activates a different key without
+        restarting the app.
         """
         deactivate_this_device(key_code)
+        usage.clear_cached_usage()
+        with self._usage_lock:
+            self._online_started_at = None
+        self._latest_usage_snapshot = None
         return {"ok": True}
 
     @_log_click
@@ -934,8 +972,25 @@ class Api:
         Called from the license-gate form. Requires internet for this
         one call; on success the token is cached locally and future
         launches work via get_license_status() with no network needed.
+
+        On success, also clears the cached usage snapshot (see
+        usage.py's clear_cached_usage()) and this instance's in-memory
+        usage state. usage.py's cache is keyed per-DEVICE, not per-key
+        — without this, activating a brand-new key would silently show
+        whatever seconds_remaining the PREVIOUS key on this device last
+        cached (e.g. a fresh key with a 25-minute trial showing "24h
+        11m left" because that's what an old key happened to have
+        left), until a real server report eventually overwrote it.
+        Clearing in-memory state too matters if the user deactivates
+        one key and activates another in the same running session,
+        without restarting the app.
         """
         result: ActivationResult = activate(key_code)
+        if result.ok:
+            usage.clear_cached_usage()
+            with self._usage_lock:
+                self._online_started_at = None
+            self._latest_usage_snapshot = None
         return {"ok": result.ok, "error": result.error}
 
     def list_microphones(self) -> list:
@@ -1032,8 +1087,28 @@ class Api:
         set_paused(paused)
         Usage (JS): window.pywebview.api.set_paused(true)
         Bound to the Pause/Resume button; keeps the session warm.
+
+        Also starts/stops the online-usage clock (see usage.py). While
+        paused, pipeline.set_paused() already stops any audio bytes
+        from reaching Azure at all (see audio.py's _callback), so
+        Azure itself isn't billing for this stretch — but before this
+        fix, _online_started_at (api.py's own local clock feeding the
+        DB-backed quota) kept running regardless, since it was only
+        ever stopped by an actual engine-mode change (see
+        _push_engine_change), never by a pause. Uses
+        _stop_online_tracking() rather than _flush_online_usage()
+        directly — the latter resets its clock to "now" rather than
+        clearing it (by design, for its normal mid-session-checkpoint
+        job), which would otherwise leave the next periodic flush
+        still reporting elapsed pause time. Restarting on resume only
+        happens if the pipeline is still actually on the online engine
+        (an offline-only session must never start this clock at all).
         """
         self._pipeline.set_paused(paused)
+        if paused:
+            self._stop_online_tracking()
+        elif self._pipeline.is_online_active:
+            self._start_online_tracking()
         return {"ok": True}
 
     def get_app_settings(self):

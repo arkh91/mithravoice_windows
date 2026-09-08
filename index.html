@@ -187,10 +187,11 @@
   /* Online-hours countdown (see usage.py) — mirrors .status-pill but
      sits top-right instead of top-left, and only ever appears when
      the current plan actually has a monthly online-hours cap to show
-     (see loadUsageStatus() in the script below). Turns amber under 30
-     minutes remaining and red under 5, using the same --gold/red
-     language as the rest of the app rather than a generic warning
-     color. */
+     (see loadUsageStatus() in the script below). Color is driven by
+     PERCENTAGE of the plan's monthly allowance remaining, not a fixed
+     minute count (see renderUsagePill()): green for the first 90% of
+     remaining time, red for the final 10% — reusing the app's
+     existing --green-live accent rather than introducing a new color. */
   .usage-pill {
     position: absolute;
     top: 18px;
@@ -202,15 +203,16 @@
     backdrop-filter: blur(6px);
     border: 1px solid rgba(255,255,255,0.08);
     border-radius: 999px;
-    padding: 8px 14px;
-    font-size: 12.5px;
+    padding: 9px 16px;
+    font-size: 15px;
+    font-weight: 600;
     color: var(--text-secondary);
     z-index: 4;
   }
   .usage-pill.hidden { display: none; }
   .usage-pill svg { flex-shrink: 0; opacity: 0.7; }
-  .usage-pill.low { color: var(--gold); border-color: rgba(232, 183, 58, 0.35); }
-  .usage-pill.low svg { opacity: 1; }
+  .usage-pill.good { color: var(--green-live); border-color: rgba(62, 207, 110, 0.35); }
+  .usage-pill.good svg { opacity: 1; }
   .usage-pill.critical { color: #e05a5a; border-color: rgba(220, 68, 68, 0.35); }
   .usage-pill.critical svg { opacity: 1; }
 
@@ -2054,10 +2056,22 @@
     return m > 0 ? `${m}m ${s}s left` : `${s}s left`;
   }
 
+  /**
+   * renderUsagePill()
+   * Usage: called any time usageRemainingSeconds/usageIncludedSeconds
+   * change (loadUsageStatus()'s poll, or the local 1-second ticker
+   * below) to repaint the pill's text and color. Color is based on
+   * the PERCENTAGE of the plan's monthly allowance still remaining,
+   * not an absolute minute count: "good" (green, --green-live) for
+   * remaining > 90% of the plan... er, remaining fraction > 10% —
+   * i.e. green while more than 10% of the allowance is left, and
+   * "critical" (red) only kicks in once 90% of the allowance has been
+   * consumed (10% or less remaining).
+   */
   function renderUsagePill() {
     const pill = document.getElementById('usagePill');
     const textEl = document.getElementById('usagePillText');
-    pill.classList.remove('low', 'critical');
+    pill.classList.remove('good', 'critical');
 
     // Unmetered right now: offline engine, or no capped plan data at
     // all (also covers "haven't started an online session yet").
@@ -2071,8 +2085,14 @@
 
     textEl.textContent = formatUsageRemaining(usageRemainingSeconds);
     pill.title = 'Online engine hours remaining this month';
-    pill.classList.toggle('critical', usageRemainingSeconds <= 300);
-    pill.classList.toggle('low', usageRemainingSeconds > 300 && usageRemainingSeconds <= 1800);
+
+    // Guard divide-by-zero for a (theoretical) 0-hour plan: treat as
+    // fully consumed rather than crashing on 0/0.
+    const remainingFraction = usageIncludedSeconds > 0
+      ? usageRemainingSeconds / usageIncludedSeconds
+      : 0;
+    pill.classList.toggle('critical', remainingFraction <= 0.10);
+    pill.classList.toggle('good', remainingFraction > 0.10);
   }
 
   /**
