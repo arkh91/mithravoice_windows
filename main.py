@@ -14,7 +14,7 @@ from api import Api
 
 def main() -> None:
     """
-    main()                                                                                                        
+    main()
     Usage: run directly (`python main.py`) to launch the desktop app.
     Not intended to be imported/called from elsewhere.
     """

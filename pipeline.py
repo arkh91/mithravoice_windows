@@ -134,12 +134,28 @@ class TranslationPipeline:
         Usage: internal — swaps the active engine to OfflineEngine
         without dropping the mic stream, so a lost internet connection
         mid-session degrades gracefully instead of going silent.
+
+        Wrapped in a try/except because OfflineEngine.start() genuinely
+        can fail (missing Whisper model directory or no Argos package
+        for the pair — see scripts/prepare_offline_assets.py). This runs
+        on the watchdog thread, so an uncaught exception here would kill
+        that thread silently and leave the app with no engine at all and
+        no indication of why. Report it as an engine change to "failed"
+        instead, so the UI can say something.
         """
         with self._lock:
             if self._engine is not None:
                 self._engine.stop()
-            self._engine = OfflineEngine()
-            self._engine.start(self._from_lang, self._to_lang, self._on_engine_result)
+            self._engine = None
+            try:
+                engine = OfflineEngine()
+                engine.start(self._from_lang, self._to_lang, self._on_engine_result)
+            except Exception as exc:  # noqa: BLE001 - must not kill the watchdog thread
+                print(f"[pipeline] offline fallback ALSO failed to start: {exc!r}")
+                if self._on_engine_change:
+                    self._on_engine_change("failed")
+                return
+            self._engine = engine
             if self._on_engine_change:
                 self._on_engine_change("offline")
 

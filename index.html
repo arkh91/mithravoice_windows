@@ -192,10 +192,20 @@
      minute count (see renderUsagePill()): green for the first 90% of
      remaining time, red for the final 10% — reusing the app's
      existing --green-live accent rather than introducing a new color. */
-  .usage-pill {
+  /* The cluster owns the corner positioning now, not .usage-pill —
+     the countdown gets display:none on uncapped plans, and the
+     connectivity indicator still has to sit in the corner when it does. */
+  .status-pills {
     position: absolute;
     top: 18px;
     right: 18px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    z-index: 4;
+  }
+
+  .usage-pill {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -207,7 +217,6 @@
     font-size: 15px;
     font-weight: 600;
     color: var(--text-secondary);
-    z-index: 4;
   }
   .usage-pill.hidden { display: none; }
   .usage-pill svg { flex-shrink: 0; opacity: 0.7; }
@@ -215,6 +224,33 @@
   .usage-pill.good svg { opacity: 1; }
   .usage-pill.critical { color: #e05a5a; border-color: rgba(220, 68, 68, 0.35); }
   .usage-pill.critical svg { opacity: 1; }
+
+  /* Connectivity indicator. Same pill shape as the countdown so the two
+     read as one cluster. The globe is an inline SVG stroked with
+     currentColor, so the online/offline classes below recolour it by
+     setting `color` — the reason this isn't an emoji (see the markup). */
+  .net-pill {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(10,13,20,0.55);
+    backdrop-filter: blur(6px);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 999px;
+    padding: 9px 12px;
+    transition: color 0.2s ease, border-color 0.2s ease, opacity 0.2s ease;
+  }
+  .net-pill.online {
+    color: var(--green-live);
+    border-color: rgba(62, 207, 110, 0.35);
+    opacity: 1;
+  }
+  /* Grey is the default state: a cold start hasn't confirmed a working
+     connection yet, so it must not claim one. */
+  .net-pill.offline {
+    color: var(--text-secondary);
+    opacity: 0.65;
+  }
 
   .maximize-btn {
     position: absolute;
@@ -321,8 +357,16 @@
   }
   .subtitle-original .highlight { color: var(--gold); font-weight: 600; }
 
+  /* No `direction` here on purpose. This used to be hardcoded to rtl,
+     which was only ever correct for the English -> Persian default:
+     with the direction reversed, the English translation rendered
+     right-aligned with its punctuation on the wrong end, and the
+     Persian source line (always ltr) rendered with misplaced
+     punctuation too. Both caption lines now carry dir="auto" in the
+     markup instead, so each one is laid out according to the script it
+     actually contains, per direction and per language, with no
+     plumbing needed to tell this window which pair is active. */
   .subtitle-translation {
-    direction: rtl;
     line-height: 1.9;
     margin-top: 12px;
     font-weight: 400;
@@ -839,20 +883,48 @@
         </div>
       </div>
 
-      <!-- Online-hours countdown: hidden by default, shown by
-           loadUsageStatus() only when get_usage_status() reports an
-           actual monthly cap (offline-only and pay-as-you-go plans
-           have none, so it stays hidden for those). -->
-      <div class="usage-pill" id="usagePill" title="Online engine hours remaining this month">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-        <span id="usagePillText">&infin;</span>
+      <!-- Top-right pill cluster. The connectivity indicator lives here
+           beside the online-hours countdown; the countdown itself is
+           hidden by loadUsageStatus() on plans with no monthly cap
+           (offline-only, pay-as-you-go), which is exactly why the
+           cluster is what's positioned and not the countdown — the
+           indicator has to stay in the corner either way. -->
+      <div class="status-pills">
+        <!-- Online-hours countdown: hidden by default, shown by
+             loadUsageStatus() only when get_usage_status() reports an
+             actual monthly cap. -->
+        <div class="usage-pill" id="usagePill" title="Online engine hours remaining this month">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+          <span id="usagePillText">&infin;</span>
+        </div>
+
+        <!-- Connectivity indicator: green globe when the online engine
+             is live, grey when running offline. Drawn as inline SVG
+             rather than the 🌐 emoji for the same reason flagSvg()
+             exists further down — Windows' default emoji font renders
+             unpredictably, and more importantly an emoji glyph carries
+             its own baked-in colour that CSS `color` cannot change, so
+             a green/grey state would not be expressible at all. -->
+        <div class="net-pill offline" id="netPill" title="Checking connection…">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <circle cx="12" cy="12" r="9"/>
+            <path d="M3 12h18"/>
+            <path d="M12 3c2.6 2.6 4 5.7 4 9s-1.4 6.4-4 9c-2.6-2.6-4-5.7-4-9s1.4-6.4 4-9z"/>
+          </svg>
+        </div>
       </div>
 
       <div class="subtitle-box pos-bottom dark text-white" id="subtitleBox" style="font-size:24px;">
-        <div class="subtitle-original" id="subOriginal">
+        <!-- dir="auto" on both lines: the browser picks ltr/rtl from the
+             first strong directional character of whatever text is in
+             the element, and re-evaluates every time updateSubtitle()
+             replaces it. That keeps Persian right-to-left and English
+             left-to-right in BOTH boxes regardless of which direction
+             the user selected. -->
+        <div class="subtitle-original" id="subOriginal" dir="auto">
           This is a <span class="highlight">real-time</span> translation. You can speak and see the translation instantly.
         </div>
-        <div class="subtitle-translation" id="subTranslated">
+        <div class="subtitle-translation" id="subTranslated" dir="auto">
           این یک <span class="highlight">ترجمهٔ زنده</span> است. شما می‌توانید صحبت کنید و ترجمه را به‌صورت آنی ببینید.
         </div>
       </div>
@@ -1504,6 +1576,34 @@
   }
 
   /**
+   * endSessionForConfigChange()
+   * Usage: call immediately after the user changes anything a session
+   * is locked to at start time — either language box, the swap button,
+   * the translation engine, or the microphone. If a session is live,
+   * ends it and returns the UI to idle so the next mic press starts a
+   * fresh session using the new setting.
+   *
+   * This has to happen at selection time rather than at the next mic
+   * press. start_session() takes from_lang, to_lang, device_index and
+   * mode as arguments and the pipeline has no way to change any of them
+   * on a running engine — there's no set_languages or set_engine on the
+   * Python side — while the mic button only pauses and resumes. So
+   * every one of those settings was frozen at whatever it was the first
+   * time the user hit the mic, for the rest of the app's run: switching
+   * to Offline in Settings, or picking a different mic, or reversing
+   * the direction, all updated the UI and the saved JSON while the
+   * session carried on with the old values.
+   */
+  function endSessionForConfigChange() {
+    if (!sessionStarted) return;
+    callApi('stop_session');
+    sessionStarted = false;
+    activeLangs = null;
+    listening = false;
+    setListening(false);
+  }
+
+  /**
    * setLanguageBox(boxId, langName)
    * Usage: call with 'langFrom'/'langTo' and a name from LANGUAGES to
    * update that box's displayed flag + text. Used for the initial
@@ -1532,6 +1632,10 @@
       row.addEventListener('click', e => {
         e.stopPropagation();
         setLanguageBox(boxId, lang.name);
+        // A running session is locked to the pair it was started with,
+        // so end it here rather than letting the user keep translating
+        // in the old direction while the UI claims otherwise.
+        endSessionForConfigChange();
         closeAllDropdowns();
       });
       dropdown.appendChild(row);
@@ -1580,6 +1684,9 @@
     const toName = document.querySelector('#langTo .lang-name').textContent;
     setLanguageBox('langFrom', toName);
     setLanguageBox('langTo', fromName);
+    // Reversing direction mid-session is exactly the case that used to
+    // silently do nothing — see endSessionForConfigChange().
+    endSessionForConfigChange();
   }
 
   // ---- Wire everything up ----
@@ -1593,7 +1700,13 @@
   // Settings page: history retention and engine mode both persist
   // immediately via save_app_settings — no separate Save button.
   setupExclusiveGroup('[data-retention]', d => callApi('save_app_settings', { history_retention: d.retention }));
-  setupExclusiveGroup('[data-engine]', d => callApi('save_app_settings', { engine_mode: d.engine }));
+  // Engine mode is passed to start_session() as an argument, so saving
+  // it is not enough on its own — a running session has to end for the
+  // new engine to actually be used. See endSessionForConfigChange().
+  setupExclusiveGroup('[data-engine]', d => {
+    callApi('save_app_settings', { engine_mode: d.engine });
+    endSessionForConfigChange();
+  });
 
   /**
    * populateSettingsMicDropdown()
@@ -1618,6 +1731,9 @@
           e.stopPropagation();
           document.getElementById('settingsMicName').textContent = device.name;
           callApi('save_app_settings', { microphone_device_index: device.index });
+          // device_index is also a start_session() argument, so the
+          // running session keeps using the old mic until it ends.
+          endSessionForConfigChange();
           closeAllDropdowns();
         });
         dropdown.appendChild(row);
@@ -1654,6 +1770,7 @@
       if (sessionStarted) {
         callApi('stop_session');
         sessionStarted = false;
+        activeLangs = null;
         listening = false;
         setListening(false);
       }
@@ -1685,6 +1802,20 @@
 
   let listening = false;
   let sessionStarted = false;
+  // The exact From/To pair the CURRENTLY RUNNING session was started
+  // with, or null when no session is running.
+  //
+  // The mic button only pauses/resumes an existing session — it never
+  // stops one (stop_session was previously reachable only from device
+  // deactivation). So without this, the language pair was frozen at
+  // whatever it was the first time the user hit the mic, for the rest
+  // of the app's run: picking new languages or hitting the swap button
+  // updated the UI but the engine kept recognizing the original source
+  // locale and emitting the original target. The visible symptom was
+  // one direction "not working" while the other was fine — whichever
+  // pair happened to be selected on that very first start was the only
+  // one that ever reached Azure.
+  let activeLangs = null;
 
   /**
    * getSelectedLanguages()
@@ -1723,11 +1854,26 @@
    * session down, so resuming is instant.
    */
   function toggleListening() {
+    const { from, to } = getSelectedLanguages();
+
+    // Safety net for the frozen-language-pair bug described above: if
+    // the selection no longer matches what the live session is actually
+    // running, end that session here so the branch below starts a fresh
+    // one on the new pair instead of just un-pausing the stale one.
+    // endSessionForConfigChange() normally gets there first (it fires
+    // the moment the user picks a language), but this covers any path
+    // that changes the boxes without going through it.
+    if (sessionStarted && activeLangs && (activeLangs.from !== from || activeLangs.to !== to)) {
+      callApi('stop_session');
+      sessionStarted = false;
+      activeLangs = null;
+      listening = false;
+    }
+
     listening = !listening;
     setListening(listening);
 
     if (listening && !sessionStarted) {
-      const { from, to } = getSelectedLanguages();
       // Use the persisted engine/microphone preferences from Settings
       // rather than hardcoded defaults, so a choice made there actually
       // takes effect on the next session.
@@ -1743,6 +1889,7 @@
         function revertToIdle(error) {
           listening = false;
           sessionStarted = false;
+          activeLangs = null;  // nothing is running, so nothing to compare against
           setListening(false);
           const messages = {
             online_not_in_plan: 'Your plan doesn\u2019t include online translation.',
@@ -1750,6 +1897,7 @@
             no_engine_in_plan: 'No translation engine is available on your current plan.',
             not_licensed: 'Your license isn\u2019t active. Please reactivate.',
             mic_start_failed: 'Couldn\u2019t open the microphone. Check it in Settings.',
+            offline_engine_unavailable: 'Offline engine isn\u2019t installed for this language pair.',
           };
           const statusText = document.getElementById('statusText');
           statusText.textContent = messages[error] || 'Couldn\u2019t start the session.';
@@ -1767,6 +1915,9 @@
         }).catch(() => revertToIdle());
       });
       sessionStarted = true;
+      // Remember what this session is actually running, so a later
+      // language change can be detected and acted on.
+      activeLangs = { from, to };
     } else if (sessionStarted) {
       callApi('set_paused', !listening);
     }
@@ -2007,22 +2158,67 @@
   };
 
   /**
+   * setNetIndicator(isOnline)
+   * Usage: setNetIndicator(true) paints the top-right globe green,
+   * setNetIndicator(false) greys it out. Driven from two sources, in
+   * priority order: setEngineBadge() below, which is Python telling us
+   * which engine is *actually* running (the authoritative answer while
+   * a session is live), and navigator.onLine, which covers the idle
+   * case when no session is running to report anything.
+   */
+  function setNetIndicator(isOnline) {
+    const pill = document.getElementById('netPill');
+    if (!pill) return;
+    pill.classList.toggle('online', !!isOnline);
+    pill.classList.toggle('offline', !isOnline);
+    pill.title = isOnline
+      ? 'Connected \u2014 online engine available'
+      : 'No connection \u2014 offline engine only';
+  }
+
+  /**
    * window.setEngineBadge(mode)
    * Usage: called BY PYTHON when the pipeline switches between "online"
    * and "offline" engines (including an automatic mid-session fallback
-   * if the internet drops). Updates the status pill's label so the user
-   * knows translation is still running, just locally. Also tracks
-   * currentEngineMode so the usage countdown below only ticks down
-   * while the metered online engine (not the free offline one) is
-   * actually active.
+   * if the internet drops), or "failed" when the offline fallback could
+   * not start either. Updates the status pill's label so the user knows
+   * translation is still running, just locally — or that it has stopped
+   * and why. Also tracks currentEngineMode so the usage countdown below
+   * only ticks down while the metered online engine (not the free
+   * offline one) is actually active, and drives the connectivity globe.
    */
   let currentEngineMode = null;  // null until the first session sets it — treated same as 'offline' (shows ∞)
   window.setEngineBadge = function (mode) {
     currentEngineMode = mode;
+    setNetIndicator(mode === 'online');
     const statusText = document.getElementById('statusText');
+    if (mode === 'failed') {
+      // Both engines are down — Azure was unreachable AND the offline
+      // engine couldn't start (see pipeline.py's _restart_on_offline).
+      // Nothing is transcribing, so say so rather than leaving
+      // "Listening…" up over a dead session.
+      listening = false;
+      sessionStarted = false;
+      activeLangs = null;
+      setListening(false);
+      statusText.textContent = 'Translation stopped \u2014 no engine available';
+      return;
+    }
     const base = listening ? 'Listening…' : 'Paused';
     statusText.textContent = mode === 'offline' ? base + ' (Offline)' : base;
   };
+
+  // Idle-state connectivity: while no session is running there's no
+  // engine to report a mode, so fall back to the browser's own view.
+  // The poll backstops the events — WebView2 does not always fire them
+  // for adapter-level changes like toggling Wi-Fi off.
+  setNetIndicator(navigator.onLine);
+  window.addEventListener('offline', () => setNetIndicator(false));
+  window.addEventListener('online', () => { if (!sessionStarted) setNetIndicator(true); });
+  setInterval(() => {
+    if (sessionStarted && currentEngineMode) return;  // engine state wins while a session is live
+    setNetIndicator(navigator.onLine);
+  }, 4000);
 
   /**
    * Online-hours countdown (see usage.py / api.py's get_usage_status())
@@ -2142,6 +2338,7 @@
   window.onOnlineQuotaExceeded = function () {
     listening = false;
     sessionStarted = false;
+    activeLangs = null;  // session is gone; next start reads the boxes fresh
     setListening(false);
     document.getElementById('statusText').textContent = 'Online hours used up this month';
     loadUsageStatus();

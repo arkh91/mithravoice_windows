@@ -37,8 +37,13 @@
 
   .original { line-height: 1.45; }
 
+  /* No `direction` here on purpose. This was hardcoded to rtl, which
+     was only correct for the English -> Persian default; with the
+     direction reversed the English translation rendered right-aligned
+     with its punctuation on the wrong end. Both caption lines carry
+     dir="auto" in the markup instead, so each is laid out by the
+     script it actually contains. Mirrors index.html. */
   .translated {
-    direction: rtl;
     line-height: 1.7;
     margin-top: 10px;
   }
@@ -83,8 +88,8 @@
   <div class="box dark" id="box">
     <button class="close-btn" id="closeBtn"
             title="Close captions and restore MithraVoice">✕</button>
-    <div class="original" id="orig">Waiting for speech…</div>
-    <div class="translated" id="trans"></div>
+    <div class="original" id="orig" dir="auto">Waiting for speech…</div>
+    <div class="translated" id="trans" dir="auto"></div>
   </div>
 
 <script>

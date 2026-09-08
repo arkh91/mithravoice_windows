@@ -35,6 +35,7 @@ from app_settings import load_settings, save_settings
 from audio import list_input_devices
 from config import settings
 from engines.base import TranslationResult
+from engines.offline_engine import OfflineEngineError
 from licensing import (
     ActivationResult,
     activate,
@@ -1058,6 +1059,19 @@ class Api:
         self._current_from_lang, self._current_to_lang = from_lang, to_lang
         try:
             self._pipeline.start(from_lang, to_lang, device_index, mode)  # type: ignore[arg-type]
+        except OfflineEngineError as exc:
+            # Distinct from the generic handler below on purpose. The
+            # offline engine needs a bundled Whisper model directory and
+            # an Argos package for the selected pair (see config.py's
+            # whisper_model_path / argos_packages_dir and
+            # scripts/prepare_offline_assets.py). When those are absent
+            # — a source checkout that never ran the prepare script, or
+            # a language pair with no bundled .argosmodel — start()
+            # raises here before the mic is ever opened, and reporting
+            # that as "mic_start_failed" sent users to check their
+            # microphone for a problem that has nothing to do with it.
+            traceback.print_exc()
+            return {"ok": False, "error": "offline_engine_unavailable", "detail": str(exc)}
         except Exception as exc:  # noqa: BLE001 - any mic/engine start failure must surface to the UI, never crash the bridge call
             # Print the full traceback to the console the app was
             # launched from — the UI only ever shows a short generic
