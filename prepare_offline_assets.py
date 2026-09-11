@@ -116,52 +116,12 @@ def download_argos_pairs(pairs: list, target_dir: Path) -> None:
         print(f"  -> {dest}")
 
 
-def download_stanza_resources(codes: list, target_dir: Path) -> None:
-    """
-    download_stanza_resources(codes, target_dir)
-    Usage: internal — downloads Stanza's tokenizer/MWT models for every
-    ISO code in `codes` into target_dir, so engines/offline_engine.py
-    never triggers Stanza's own (separate, unbundled-by-default)
-    download on first use.
-
-    THIS STEP WAS MISSING, and is the actual root cause of offline
-    sessions hanging indefinitely rather than starting or failing fast:
-    Argos Translate uses Stanza for sentence-boundary detection on some
-    language packages (see engines/offline_engine.py's module
-    docstring). Stanza has its own model cache, entirely separate from
-    the .argosmodel files download_argos_pairs() handles above — the
-    Whisper model and Argos packages being fully bundled was never
-    enough on its own. Left unbundled, the first sentence Argos needs
-    to split makes a network call with no timeout of its own; on a
-    disconnected machine that hangs forever instead of failing.
-
-    Not every code has a Stanza model (and some genuinely don't need
-    one for sbd), so a per-language failure here is reported and
-    skipped rather than aborting the whole run, matching
-    download_argos_pairs()'s "! no package found" pattern above.
-    config.py points STANZA_RESOURCES_DIR at this same target_dir, so
-    once it's here Stanza finds it automatically at runtime with no
-    further wiring needed.
-    """
-    import stanza
-
-    target_dir.mkdir(parents=True, exist_ok=True)
-    print("Downloading Stanza sentence-boundary-detection resources...")
-    for code in codes:
-        try:
-            stanza.download(code, model_dir=str(target_dir), verbose=False)
-            print(f"  -> {code}")
-        except Exception as exc:  # noqa: BLE001 - not every code has/needs a Stanza model
-            print(f"  ! no Stanza resources for {code!r}, skipping ({exc!r})")
-
-
 def main() -> None:
     """
     main()
     Usage: run directly, see module docstring. After this completes,
-    models/whisper-small/, models/argos/*.argosmodel, and
-    models/stanza/ all exist locally and build.spec's `datas` entries
-    will bundle them into the .exe.
+    models/whisper-small/ and models/argos/*.argosmodel exist locally
+    and build.spec's `datas` entries will bundle them into the .exe.
     """
     parser = argparse.ArgumentParser(description="Pre-download offline assets for a fully offline-capable build")
     parser.add_argument("--model", default="small", help="faster-whisper model size (tiny/base/small/medium/large-v3)")
@@ -176,11 +136,6 @@ def main() -> None:
         action="store_true",
         help="also try to download direct non-English pairs (fr-es, tr-zh, ...). Optional — these already work via the English pivot.",
     )
-    parser.add_argument(
-        "--skip-stanza",
-        action="store_true",
-        help="skip downloading Stanza sentence-boundary-detection resources (NOT recommended — see download_stanza_resources's docstring for why offline sessions hang without them).",
-    )
     args = parser.parse_args()
 
     pairs = args.pairs if args.pairs is not None else hub_pairs()
@@ -191,15 +146,9 @@ def main() -> None:
     download_whisper_model(args.model, whisper_target)
     download_argos_pairs(pairs, ARGOS_DIR)
 
-    stanza_target = PROJECT_ROOT / "models" / "stanza"
-    if not args.skip_stanza:
-        download_stanza_resources(all_iso_codes(), stanza_target)
-
     print("\nDone. Bundled assets:")
     print(f"  {whisper_target}")
     print(f"  {ARGOS_DIR} ({len(list(ARGOS_DIR.glob('*.argosmodel')))} language pairs)")
-    if not args.skip_stanza:
-        print(f"  {stanza_target}")
     print("\nIf you used a model size other than 'small', update WHISPER_MODEL_PATH")
     print("in config.py (or the .env) and build.spec's datas entry to match.")
 

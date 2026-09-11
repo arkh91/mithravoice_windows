@@ -57,6 +57,7 @@ a = Analysis(
         ("models/whisper-small", "models/whisper-small"),
         ("models/argos", "models/argos"),
         ("keys/mithravoice_public_key.pem", "keys"),
+        ("assets/mithracorp_logo.ico", "assets"),  # window/taskbar icon, set at runtime via webview.start(icon=...) in main.py
     ] + azure_datas,
     hiddenimports=[
         "engines.azure_engine",
@@ -90,7 +91,7 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,  # --windowed: no console window behind the app
-    icon=None,      # set to "assets/mithravoice.ico" once you have one
+    icon="assets/mithracorp_logo.ico",  # .exe file icon (Explorer, taskbar pin, Alt-Tab) — separate from the runtime window icon set in main.py's webview.start(icon=...)
 )
 
 coll = COLLECT(

@@ -29,29 +29,9 @@ def _load_dotenv(path: str = ".env") -> None:
     Usage: called once at import time. Reads a simple KEY=VALUE .env file
     (if present) and injects any keys not already set in os.environ, so
     real environment variables always take precedence over the file.
-
-    `path` is resolved against the DIRECTORY THIS FILE LIVES IN, not the
-    current working directory. It used to be Path(".env") — a
-    CWD-relative lookup — which meant the app found its Azure
-    credentials only when launched from the project root. Started from
-    a desktop shortcut, a Start-menu entry, or anywhere else, the file
-    was simply not found, azure_configured came back False, and
-    pipeline.py fell back to the offline engine before touching the
-    network. Nothing said so: the console line is easy to miss and the
-    UI shows only a grey globe. Worse, scripts/diagnose.py looks for
-    PROJECT_ROOT/".env" (absolute), so it reported the credentials as
-    fine while the app couldn't see them — the two disagreed about the
-    same machine depending purely on where each was launched from.
-
-    Still checks the CWD as a fallback, so an existing setup that put
-    a .env somewhere other than next to config.py keeps working.
     """
-    here = Path(__file__).parent
-    for candidate in (here / path, Path(path)):
-        if candidate.exists():
-            env_path = candidate
-            break
-    else:
+    env_path = Path(path)
+    if not env_path.exists():
         return
     for line in env_path.read_text().splitlines():
         line = line.strip()
@@ -82,16 +62,6 @@ class Settings:
     # --- Azure Speech Translation (online engine) ---
     azure_speech_key: str = field(default_factory=lambda: os.environ.get("AZURE_SPEECH_KEY", ""))
     azure_speech_region: str = field(default_factory=lambda: os.environ.get("AZURE_SPEECH_REGION", ""))
-    # Optional, and normally left empty. Region-based auth
-    # (key + region) is what a classic Speech resource wants. A
-    # resource with a custom subdomain — which every Azure AI Services
-    # / AI Foundry multi-service resource has, and which is what an
-    # 84-character non-hex key indicates — rejects region-based auth
-    # with 401 regardless of how correct the key is. Set this to the
-    # value on the resource's "Keys and Endpoint" page (e.g.
-    # https://my-resource.cognitiveservices.azure.com/) and
-    # azure_engine.py will authenticate against it instead.
-    azure_speech_endpoint: str = field(default_factory=lambda: os.environ.get("AZURE_SPEECH_ENDPOINT", ""))
 
     # --- Offline engine (faster-whisper + Argos Translate) ---
     # If whisper_model_path points at a real bundled ctranslate2 model
@@ -109,18 +79,6 @@ class Settings:
     # hitting the Argos package index over the network.
     argos_packages_dir: str = field(default_factory=lambda: os.environ.get("ARGOS_PACKAGES_DIR", _resource_path("models/argos")))
 
-    # Argos Translate uses a separate library, Stanza, for sentence
-    # boundary detection on some language packages (see
-    # engines/offline_engine.py's module docstring and
-    # scripts/prepare_offline_assets.py's download_stanza_resources).
-    # Stanza has its OWN model cache, entirely separate from the
-    # .argosmodel files above — bundling those alone does not cover
-    # this. Left unbundled, the first sentence Stanza needs to split
-    # triggers a network download with no timeout, which is what
-    # actually caused offline sessions to hang indefinitely rather than
-    # ever reporting a clean, fast failure.
-    stanza_resources_dir: str = field(default_factory=lambda: os.environ.get("STANZA_RESOURCES_DIR", _resource_path("models/stanza")))
-
     # --- Licensing ---
     license_server_url: str = field(default_factory=lambda: os.environ.get("LICENSE_SERVER_URL", "https://key.mithravoice.mithracorp.com"))
     license_public_key_path: str = field(default_factory=lambda: os.environ.get("LICENSE_PUBLIC_KEY_PATH", _resource_path("keys/mithravoice_public_key.pem")))
@@ -134,30 +92,10 @@ class Settings:
         """
         azure_configured
         Usage: check `settings.azure_configured` before attempting to use
-        the online engine. True when a key is present alongside EITHER a
-        region or an explicit endpoint — the two auth modes are
-        alternatives, so requiring a region would rule out every
-        custom-domain resource.
-
-        Note this only reports that credentials exist, never that Azure
-        accepts them. A revoked key, a region that doesn't match the
-        resource, or a blocked WebSocket all pass this check and then
-        fail at connect time. Use scripts/check_azure_live.py to test
-        the credentials for real.
+        the online engine; True only when both the key and region are set.
         """
-        return bool(self.azure_speech_key and (self.azure_speech_region or self.azure_speech_endpoint))
+        return bool(self.azure_speech_key and self.azure_speech_region)
 
 
 settings = Settings()
-
-# Stanza (see stanza_resources_dir above) reads this environment
-# variable to decide where to look for/cache its own NLP models,
-# entirely independent of anything else in this file. Must be set
-# before argostranslate or stanza is ever imported — config.py is
-# imported before either of those anywhere in this codebase, so module
-# load time here is the earliest and only place this is guaranteed to
-# take effect. setdefault(), not direct assignment, so an operator who
-# already set STANZA_RESOURCES_DIR explicitly (e.g. to point at a
-# shared cache) is never overridden.
-os.environ.setdefault("STANZA_RESOURCES_DIR", settings.stanza_resources_dir)
 

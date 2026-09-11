@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MithraCorp — Live Translation</title>
+<title>Mithra Voice — Live Translation</title>
 <style>
   :root {
     --bg-app: #0b0e14;
@@ -140,8 +140,42 @@
     gap: 10px;
   }
 
-  .sidebar-footer .brand-mark { width: 74px; height: 74px; opacity: 0.92; }
-  .sidebar-footer .name { font-size: 13px; letter-spacing: 2.6px; color: var(--gold); }
+  /* Resets the button element back to looking like the plain stacked
+     logo it replaced, so the footer is pixel-identical at rest and only
+     announces itself as a link on hover/focus. The internal gap is the
+     10px the .sidebar-footer flex gap used to provide between the logo
+     and the wordmark; the footer's own gap now spaces this block from
+     the motto below. */
+  .brand-link {
+    background: none;
+    border: none;
+    padding: 0;
+    margin: 0;
+    font: inherit;
+    color: inherit;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+  }
+  .brand-link:hover .brand-mark { opacity: 1; transform: scale(1.04); }
+  .brand-link:hover .name { color: #ffd27a; }
+  .brand-link:active .brand-mark { transform: scale(0.99); }
+  /* focus-visible, not focus: keyboard users get a ring, mouse users
+     don't get one left behind after clicking. */
+  .brand-link:focus { outline: none; }
+  .brand-link:focus-visible { outline: 2px solid var(--gold); outline-offset: 4px; }
+
+  .sidebar-footer .brand-mark {
+    width: 74px; height: 74px; opacity: 0.92;
+    transition: opacity 0.15s ease, transform 0.15s ease;
+  }
+  .sidebar-footer .name {
+    font-size: 13px; letter-spacing: 2.6px; color: var(--gold);
+    transition: color 0.15s ease;
+  }
   .sidebar-footer .motto {
     font-size: 8px;
     letter-spacing: 1.4px;
@@ -250,6 +284,15 @@
   .net-pill.offline {
     color: var(--text-secondary);
     opacity: 0.65;
+  }
+  /* Amber/gold: a transition is actively in progress — falling back to
+     offline after a drop, or attempting to climb back to Azure. Distinct
+     from both settled states so the pill never claims a stability it
+     doesn't have yet. */
+  .net-pill.connecting {
+    color: var(--gold);
+    border-color: rgba(232, 183, 58, 0.35);
+    opacity: 1;
   }
 
   .maximize-btn {
@@ -753,6 +796,9 @@
     font-size: 12px;
   }
   .license-help-links.hidden { display: none; }
+  .license-purchase-link { text-align: center; margin-top: 14px; font-size: 11.5px; }
+  .license-purchase-link a { color: var(--gold); text-decoration: none; }
+  .license-purchase-link a:hover { text-decoration: underline; }
   .license-help-links a {
     color: var(--gold);
     text-decoration: none;
@@ -798,11 +844,18 @@
 <div class="license-gate hidden" id="licenseGate">
   <div class="license-card">
     <img class="brand-mark" src="assets/mithracorp_logo.png" alt="MithraCorp">
-    <h1>MITHRACORP</h1>
+    <h1>Mithra Voice</h1>
     <p class="sub">Enter your subscription key to continue</p>
     <input class="license-input" id="licenseInput" type="text" placeholder="MVCE-XXXX-XXXX-XXXX" maxlength="19">
     <button class="license-submit" id="licenseSubmit">Activate</button>
     <div class="license-error" id="licenseError"></div>
+    <!-- Always visible (unlike the Renew/Contact links below, which
+         only appear for specific failure reasons) since anyone
+         without a key yet needs a way to get one before they can
+         even attempt activation. -->
+    <div class="license-purchase-link">
+      <a href="#" id="licensePurchaseLink">Don't have a key? Purchase one</a>
+    </div>
     <div class="license-help-links hidden" id="licenseHelpLinks">
       <a href="#" id="licenseRenewLink">Renew your subscription</a>
       <span class="license-help-sep">·</span>
@@ -828,7 +881,7 @@
     <div class="brand">
       <img class="brand-mark" src="assets/mithracorp_logo.png" alt="MithraCorp">
       <div class="brand-text">
-        <div class="name">MITHRACORP</div>
+        <div class="name">Mithra Voice</div>
         <div class="tagline">TECHNOLOGY FOR A FREE TOMORROW</div>
       </div>
     </div>
@@ -860,9 +913,26 @@
       </button>
     </nav>
 
+    <!-- The logo and wordmark together are one clickable target that
+         opens mithracorp.com in the user's default browser (see
+         openBrandSite() in JS). A <button> rather than an <a>: this is
+         a desktop window, and an anchor with a real href risks the
+         webview NAVIGATING ITSELF to the site if a click ever gets
+         through before JS has attached — replacing the whole app UI
+         with a web page and leaving no way back, since the window has
+         no browser chrome. A button cannot navigate, so the only way
+         the URL can ever be opened is the intended one, through
+         Python's open_external_link().
+
+         The motto stays outside the button: it's a tagline, not part
+         of the identity mark, and including it would make the hover
+         affordance cover the entire footer. -->
     <div class="sidebar-footer">
-      <img class="brand-mark" src="assets/mithracorp_logo.png" alt="MithraCorp">
-      <div class="name">MITHRACORP</div>
+      <button type="button" class="brand-link" id="brandLink"
+              title="Visit mithracorp.com">
+        <img class="brand-mark" src="assets/mithracorp_logo.png" alt="MithraCorp">
+        <div class="name">MITHRACORP</div>
+      </button>
       <div class="motto">CONNECT &nbsp;·&nbsp; TRANSLATE &nbsp;·&nbsp; EMPOWER</div>
     </div>
   </aside>
@@ -1006,23 +1076,27 @@
         Display
       </div>
       <button class="option-btn active" data-display="both">
-        <span class="tag">EN+FA</span> Show Both (EN + FA)
+        <span class="tag" id="displayTagBoth">EN+FA</span> <span id="displayLabelBoth">Show Both (EN + FA)</span>
       </button>
       <button class="option-btn" data-display="original">
-        <span class="tag">EN</span> Show Original Only
+        <span class="tag" id="displayTagOriginal">EN</span> Show Original Only
       </button>
       <button class="option-btn" data-display="translation">
-        <span class="tag">FA</span> Show Translation Only
+        <span class="tag" id="displayTagTranslation">FA</span> Show Translation Only
       </button>
     </div>
 
-    <!-- Translation Style: kept standalone — this is about HOW the
-         translation is worded (linguistic), which is a different
-         question from how the caption box looks. See "Caption Style"
-         below for the merged visual settings (background/position/
-         text size), which used to be split across this section (font
-         size didn't really belong here either), a separate Position
-         section, and a separate Appearance section.
+    <!-- Translation Style: everything about how the translated TEXT
+         itself reads — the typeface it is set in, how big it is, and
+         what colour it is drawn in.
+
+         Font Style and Text size live here rather than under Caption
+         Style because they are properties of the text, not of the box
+         around it: changing the typeface or the size changes the
+         translation's legibility whether or not there is a panel
+         behind it, and stays meaningful in the Light theme where there
+         is no caption box at all. Caption Style below is now purely
+         about the box — its background and where it sits.
 
          Text Color lives here rather than in Caption Style's
          Background control on purpose: Background used to also force
@@ -1035,9 +1109,36 @@
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7V4h16v3M9 20h6M12 4v16"/></svg>
         Translation Style
       </div>
-      <div class="select-box" id="styleSelect">
-        <div class="left"><span class="lang-name">Natural (Recommended)</span></div>
+      <!-- Font Style: the dropdown rows are each rendered IN the font
+           they select, so the choice is made by looking at the type
+           rather than by recognising a font name. Populated from
+           CAPTION_FONTS in JS — see populateFontDropdown().
+
+           This is the section's first control now. It used to sit
+           under a "Natural (Recommended)" select for the translation's
+           wording register, which was removed: it was rendered as a
+           dropdown, chevron and all, but had no panel behind it and no
+           click handler anywhere — a control that looked interactive
+           and did nothing, with no second option to offer even if it
+           had worked. If a wording register is ever added, it belongs
+           back here above Font Style, with real options behind it. -->
+      <div class="field-label">Font Style</div>
+      <div class="select-box" id="fontFamilyBox">
+        <div class="left"><span class="lang-name" id="fontFamilyName">System Default</span></div>
         <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+        <div class="lang-dropdown" id="fontFamilyBoxDropdown"></div>
+      </div>
+
+      <div class="field-label top-margin">Text Size</div>
+      <div class="slider-row">
+        <!-- Decreases the subtitle font size by 1px, min 14px -->
+        <button class="slider-btn" id="fontMinus">−</button>
+        <input type="range" id="fontSlider" min="14" max="40" value="24">
+        <!-- Increases the subtitle font size by 1px, max 40px -->
+        <button class="slider-btn" id="fontPlus">+</button>
+      </div>
+      <div style="display:flex; justify-content:flex-end; margin-top:4px;">
+        <span class="font-size-val" id="fontVal">24</span>
       </div>
 
       <div class="field-label top-margin">Text Color</div>
@@ -1053,10 +1154,10 @@
       </div>
     </div>
 
-    <!-- Caption Style: everything that affects how the caption box
-         itself looks/sits on screen, consolidated into one section —
-         Background (was "Appearance"), Position, and Text (font
-         size). -->
+    <!-- Caption Style: how the caption BOX looks and where it sits —
+         its Background treatment and its Position on screen. Anything
+         about the text inside it (typeface, size, colour) lives under
+         Translation Style above. -->
     <div class="section">
       <div class="section-title">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
@@ -1100,23 +1201,15 @@
           Center
         </button>
       </div>
-
-      <div class="field-label top-margin">Text</div>
-      <div class="slider-row">
-        <!-- Decreases the subtitle font size by 1px, min 14px -->
-        <button class="slider-btn" id="fontMinus">−</button>
-        <input type="range" id="fontSlider" min="14" max="40" value="24">
-        <!-- Increases the subtitle font size by 1px, max 40px -->
-        <button class="slider-btn" id="fontPlus">+</button>
-      </div>
-      <div style="display:flex; justify-content:flex-end; margin-top:4px;">
-        <span class="font-size-val" id="fontVal">24</span>
-      </div>
     </div>
 
+    <!-- Mirrors the Settings page's Microphone display. Both are kept
+         in sync by setMicrophoneName(); the id is what lets that
+         function target this one explicitly rather than relying on
+         document order. -->
     <div class="mic-device">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg>
-      Microphone: <b>Default Device</b>
+      Microphone: <b id="liveMicName">Default Device</b>
     </div>
   </aside>
 
@@ -1172,11 +1265,18 @@
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg>
           Microphone
         </div>
-        <div class="select-box" id="settingsMicSelect">
-          <div class="left"><span id="settingsMicName">Default Device</span></div>
-          <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
-          <div class="lang-dropdown" id="settingsMicSelectDropdown"></div>
+        <!-- Read-only: reflects whatever Windows currently has set as
+             the default input device, refreshed on a timer by
+             pollDefaultMicrophone() below. There's no picker here on
+             purpose — this always follows the OS default rather than
+             letting a specific device be pinned, so switching
+             headsets/mics in Windows just works without opening this
+             app. -->
+        <div class="mic-device" id="settingsMicSelect">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg>
+          Default Device: <b id="settingsMicName">Loading…</b>
         </div>
+        <p class="setting-note">Always follows your Windows default microphone — change it in Windows' Sound settings, not here.</p>
       </div>
 
       <div class="section">
@@ -1191,6 +1291,18 @@
         </div>
         <button class="option-btn" id="deactivateDeviceBtn" style="margin-top:12px; color:#e8724a;">Deactivate This Device</button>
         <p class="setting-note" id="deactivateNote"></p>
+      </div>
+
+      <div class="section">
+        <div class="section-title">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-3.5-7.1M21 4v5h-5"/></svg>
+          Software Update
+        </div>
+        <div class="account-card">
+          <div class="account-row"><span>Current Version</span><b id="settingsCurrentVersion">Loading…</b></div>
+        </div>
+        <button class="option-btn" id="checkUpdateBtn" style="margin-top:12px;">Check for Update</button>
+        <p class="setting-note" id="settingsUpdateNote"></p>
       </div>
     </div>
   </section>
@@ -1236,7 +1348,7 @@
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 8l6 6 6-6"/><path d="M3 3h18v18H3z" opacity="0"/><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15 15 0 0 1 0 20 15 15 0 0 1 0-20z"/></svg>
           Languages
         </div>
-        <p class="setting-note">English and Persian (Farsi), translated live in both directions. More languages are in development.</p>
+        <p class="setting-note">English, Persian (Farsi), Spanish, French, German, Arabic, Mandarin Chinese, Turkish and Dutch (Netherlands) — any language to any other, in both directions. Pick the pair with the From/To boxes on the Live Translation page.</p>
       </div>
 
       <div class="section">
@@ -1322,15 +1434,88 @@
       applyEngineLock(status.online_allowed, status.offline_allowed);
     });
 
-    populateSettingsMicDropdown();
+    // Not strictly required since pollDefaultMicrophone() already runs
+    // on its own timer (see below), but refreshing right when the
+    // Settings page opens means it's never showing a stale value from
+    // just before the next tick.
+    pollDefaultMicrophone();
 
     callApi('get_history_folder').then(path => {
       if (path) document.getElementById('historyPathText').textContent = path;
+    });
+
+    // Current version needs no network (see get_app_version's
+    // docstring), so it's shown immediately every time the page opens
+    // rather than waiting on the Check for Update button.
+    document.getElementById('settingsUpdateNote').textContent = '';
+    callApi('get_app_version').then(result => {
+      const version = (result && result.version) || '';
+      document.getElementById('settingsCurrentVersion').textContent = version || 'Unknown';
     });
   }
   document.getElementById('openHistoryFolderBtn').addEventListener('click', () => {
     callApi('open_history_folder');
   });
+
+  // The page the Settings "Check for Update" button sends people to
+  // when a newer version is available. Deliberately a fixed URL rather
+  // than check_for_update()'s own download_url (used by the startup
+  // toast instead, see showUpdateToast) — this is the address the
+  // manual, user-initiated check should always land on regardless of
+  // what any particular server response happens to include.
+  const MANUAL_UPDATE_DOWNLOAD_URL = 'https://mithracorp.com/mithravoicedownload.html';
+
+  /**
+   * checkForUpdateFromSettings()
+   * Usage: bound to the Settings page's "Check for Update" button.
+   * Unlike the silent startup check in onLicenseValid() (which only
+   * ever surfaces a toast when an update IS available and says nothing
+   * otherwise), this is a manual, user-initiated action — it always
+   * reports something back: up to date, an update is available, or
+   * the check itself failed, so clicking the button never looks like
+   * it did nothing.
+   */
+  function checkForUpdateFromSettings() {
+    const btn = document.getElementById('checkUpdateBtn');
+    const note = document.getElementById('settingsUpdateNote');
+    btn.disabled = true;
+    btn.textContent = 'Checking…';
+    note.textContent = '';
+    note.style.color = '';
+
+    callApi('check_for_update').then(result => {
+      btn.disabled = false;
+      btn.textContent = 'Check for Update';
+      if (!result) {
+        note.textContent = 'Couldn\u2019t check for updates. Check your internet connection and try again.';
+        note.style.color = '#e8724a';
+        return;
+      }
+      if (result.update_available) {
+        note.innerHTML = '';
+        const text = document.createElement('span');
+        text.textContent = `Version ${result.latest_version} is available (you have ${result.current_version}). `;
+        note.appendChild(text);
+        const link = document.createElement('a');
+        link.href = '#';
+        link.textContent = 'Download the latest version';
+        link.style.color = 'var(--gold)';
+        link.addEventListener('click', e => {
+          e.preventDefault();
+          callApi('open_external_link', MANUAL_UPDATE_DOWNLOAD_URL);
+        });
+        note.appendChild(link);
+      } else {
+        note.textContent = `You're up to date (v${result.current_version}).`;
+      }
+    }).catch(() => {
+      btn.disabled = false;
+      btn.textContent = 'Check for Update';
+      note.textContent = 'Couldn\u2019t check for updates. Check your internet connection and try again.';
+      note.style.color = '#e8724a';
+    });
+  }
+  document.getElementById('checkUpdateBtn').addEventListener('click', checkForUpdateFromSettings);
 
   /**
    * applyEngineLock(onlineAllowed, offlineAllowed)
@@ -1479,6 +1664,91 @@
   }
 
   /**
+   * CAPTION_FONTS
+   * Usage: the list the Font Style dropdown under Translation Style is
+   * built from. `stack` is a complete CSS font-family value and is the
+   * ONLY thing that ever leaves this file — it is applied directly to
+   * the caption box and passed verbatim to the full-screen Translation
+   * window as a query param (see openTranslationWindow), so adding a
+   * font here needs no matching change in api.py or translation.html.
+   *
+   * Every stack ends in a generic family, and each one names fonts
+   * that ship with Windows. Captions are frequently Persian/Arabic
+   * script, which most decorative Latin faces have no glyphs for at
+   * all — the trailing generic is what keeps a missing glyph looking
+   * like a different font rather than an empty box. Segoe UI is the
+   * default because it is the one face on the list with full coverage
+   * of both scripts at every weight.
+   *
+   * Every stack also names "Microsoft YaHei" (Simplified Chinese, ships
+   * with Windows) before its generic, because now that Mandarin is a
+   * selectable target none of the Latin faces above — Georgia and
+   * Consolas especially — carry a single Han glyph. Chromium's own
+   * system fallback usually rescues this, but "usually" is not
+   * something a caption should depend on: naming the font makes CJK
+   * rendering deterministic instead of leaving it to per-machine
+   * fallback order.
+   */
+  const CAPTION_FONTS = [
+    { name: 'System Default', stack: '-apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif' },
+    { name: 'Segoe UI', stack: '"Segoe UI", "Microsoft YaHei", sans-serif' },
+    { name: 'Arial', stack: 'Arial, Helvetica, "Microsoft YaHei", sans-serif' },
+    { name: 'Tahoma', stack: 'Tahoma, Geneva, "Microsoft YaHei", sans-serif' },
+    { name: 'Verdana', stack: 'Verdana, Geneva, "Microsoft YaHei", sans-serif' },
+    { name: 'Calibri', stack: 'Calibri, "Segoe UI", "Microsoft YaHei", sans-serif' },
+    { name: 'Georgia', stack: 'Georgia, "Times New Roman", "Microsoft YaHei", serif' },
+    { name: 'Times New Roman', stack: '"Times New Roman", Times, "Microsoft YaHei", serif' },
+    { name: 'Consolas', stack: 'Consolas, "Courier New", "Microsoft YaHei", monospace' },
+  ];
+
+  /**
+   * setFontFamily(stack)
+   * Usage: stack is one of CAPTION_FONTS' `stack` values. Applies the
+   * typeface to the stage's caption box, updates the label in the Font
+   * Style select, and records it so openTranslationWindow() can pass
+   * the same one on. Falls back to the first entry if handed something
+   * that isn't on the list, so a stale saved value can't leave the
+   * captions in an unnamed font the picker doesn't show as selected.
+   */
+  let currentFontFamily = CAPTION_FONTS[0].stack;
+  function setFontFamily(stack) {
+    const font = CAPTION_FONTS.find(f => f.stack === stack) || CAPTION_FONTS[0];
+    document.getElementById('subtitleBox').style.fontFamily = font.stack;
+    document.getElementById('fontFamilyName').textContent = font.name;
+    currentFontFamily = font.stack;
+  }
+
+  /**
+   * populateFontDropdown()
+   * Usage: called once on load. Fills the Font Style select's panel
+   * with one clickable row per CAPTION_FONTS entry. Each row is set in
+   * the font it selects, so the list is read as a type specimen rather
+   * than as a list of names — which matters most for the faces whose
+   * names say least about how they look.
+   *
+   * Reuses the same .lang-dropdown / .lang-option markup the language
+   * selects use, and is opened by the same setupLanguageDropdown()
+   * wiring, so it inherits the click-outside-to-close and
+   * only-one-open-at-a-time behaviour for free.
+   */
+  function populateFontDropdown() {
+    const dropdown = document.getElementById('fontFamilyBoxDropdown');
+    dropdown.innerHTML = '';
+    CAPTION_FONTS.forEach(font => {
+      const row = document.createElement('div');
+      row.className = 'lang-option';
+      row.textContent = font.name;
+      row.style.fontFamily = font.stack;
+      row.addEventListener('click', e => {
+        e.stopPropagation();
+        setFontFamily(font.stack);
+        closeAllDropdowns();
+      });
+      dropdown.appendChild(row);
+    });
+  }
+
+  /**
    * setFontSize(px)
    * Usage: px is a number between 14 and 40. Applies the subtitle font
    * size live to the stage text and keeps the slider, +/- buttons, and
@@ -1541,15 +1811,22 @@
    * languages.py is what actually maps a selected name to the locale
    * codes each translation engine needs.
    */
+  // `code` is the short 2-letter label used for the Display section's
+  // tags ("EN+FA", "Show Original Only" etc. — see
+  // updateDisplayLabels()) — kept distinct from `iso` (the flag-svg
+  // lookup key) since flag keys are country-shaped ('us', 'ir') while
+  // these are language-shaped ('EN', 'FA'), and they don't always
+  // agree (e.g. Mandarin Chinese: iso 'cn' / code 'ZH').
   const LANGUAGES = [
-    { name: 'English', iso: 'us' },
-    { name: 'Persian (Farsi)', iso: 'ir' },
-    { name: 'Spanish', iso: 'es' },
-    { name: 'French', iso: 'fr' },
-    { name: 'German', iso: 'de' },
-    { name: 'Arabic', iso: 'sa' },
-    { name: 'Mandarin Chinese', iso: 'cn' },
-    { name: 'Turkish', iso: 'tr' },
+    { name: 'English', iso: 'us', code: 'EN' },
+    { name: 'Persian (Farsi)', iso: 'ir', code: 'FA' },
+    { name: 'Spanish', iso: 'es', code: 'ES' },
+    { name: 'French', iso: 'fr', code: 'FR' },
+    { name: 'German', iso: 'de', code: 'DE' },
+    { name: 'Arabic', iso: 'sa', code: 'AR' },
+    { name: 'Mandarin Chinese', iso: 'cn', code: 'ZH' },
+    { name: 'Turkish', iso: 'tr', code: 'TR' },
+    { name: 'Dutch (Netherlands)', iso: 'nl', code: 'NL' },
   ];
 
   /**
@@ -1571,6 +1848,7 @@
       sa: '<svg viewBox="0 0 20 14" xmlns="http://www.w3.org/2000/svg"><rect width="20" height="14" fill="#006c35"/><rect y="9.5" width="20" height="1.6" fill="#fff"/></svg>',
       cn: '<svg viewBox="0 0 20 14" xmlns="http://www.w3.org/2000/svg"><rect width="20" height="14" fill="#de2910"/><polygon points="3,2 3.7,4 5.8,4 4.1,5.2 4.7,7.2 3,6 1.3,7.2 1.9,5.2 0.2,4 2.3,4" fill="#ffde00"/><circle cx="7.5" cy="1.3" r="0.5" fill="#ffde00"/><circle cx="8.6" cy="3" r="0.5" fill="#ffde00"/><circle cx="8.6" cy="5" r="0.5" fill="#ffde00"/><circle cx="7.4" cy="6.6" r="0.5" fill="#ffde00"/></svg>',
       tr: '<svg viewBox="0 0 20 14" xmlns="http://www.w3.org/2000/svg"><rect width="20" height="14" fill="#e30a17"/><circle cx="8" cy="7" r="3.6" fill="#fff"/><circle cx="9.1" cy="7" r="2.9" fill="#e30a17"/><polygon points="12.3,7 14.7,7.9 13.3,5.8 13.3,8.2 14.7,6.1" fill="#fff"/></svg>',
+      nl: '<svg viewBox="0 0 20 14" xmlns="http://www.w3.org/2000/svg"><rect width="20" height="4.67" fill="#ae1c28"/><rect y="4.67" width="20" height="4.67" fill="#fff"/><rect y="9.33" width="20" height="4.67" fill="#21468b"/></svg>',
     };
     return flags[iso] || '<svg viewBox="0 0 20 14" xmlns="http://www.w3.org/2000/svg"><rect width="20" height="14" fill="#444"/></svg>';
   }
@@ -1614,13 +1892,56 @@
     const box = document.getElementById(boxId);
     box.querySelector('.lang-name').textContent = lang.name;
     document.getElementById(boxId + 'Flag').innerHTML = flagSvg(lang.iso);
+    // Keep the Display section's EN/FA-style tags in sync with
+    // whatever the From/To boxes actually say — see
+    // updateDisplayLabels() for why this used to be hardcoded.
+    if (boxId === 'langFrom' || boxId === 'langTo') updateDisplayLabels();
+  }
+
+  /**
+   * updateDisplayLabels()
+   * Usage: called every time the From or To language changes (via
+   * setLanguageBox, which covers initial load, dropdown picks, and
+   * swapLanguages). Rewrites the three Display option tags/labels
+   * ("EN+FA" / "Show Both (EN + FA)" etc.) to use the CURRENT
+   * From/To language codes instead of the English/Farsi codes that
+   * used to be hardcoded into the markup regardless of what languages
+   * were actually selected.
+   */
+  function updateDisplayLabels() {
+    const fromName = document.querySelector('#langFrom .lang-name').textContent;
+    const toName = document.querySelector('#langTo .lang-name').textContent;
+    const fromCode = (LANGUAGES.find(l => l.name === fromName) || LANGUAGES[0]).code;
+    const toCode = (LANGUAGES.find(l => l.name === toName) || LANGUAGES[1]).code;
+
+    document.getElementById('displayTagBoth').textContent = `${fromCode}+${toCode}`;
+    document.getElementById('displayLabelBoth').textContent = `Show Both (${fromCode} + ${toCode})`;
+    document.getElementById('displayTagOriginal').textContent = fromCode;
+    document.getElementById('displayTagTranslation').textContent = toCode;
   }
 
   /**
    * populateDropdown(boxId)
    * Usage: called once on load per box. Fills that box's dropdown panel
    * with every LANGUAGES entry as a clickable row (flag + name);
-   * clicking a row selects it via setLanguageBox and closes the panel.
+   * clicking a row selects it via selectLanguage and closes the panel.
+   * The panels never need rebuilding, since their contents don't depend
+   * on what is currently selected.
+   *
+   * EVERY language appears in BOTH lists, always. An earlier version of
+   * this filtered out whatever the other box had selected, to stop the
+   * same language being picked on both sides. That was the wrong cure:
+   * because To defaults to Persian (Farsi), Persian was missing from
+   * the From list the moment the app opened, and the only way to get it
+   * back was to first change To to something else — so it read as the
+   * language having been dropped from the build entirely. A language
+   * silently absent from a picker is far worse than the problem it was
+   * solving.
+   *
+   * The same-language case is handled in the click handler instead:
+   * choosing the language the other box already has SWAPS the two,
+   * which is both the obvious intent and always a valid pair. See
+   * selectLanguage().
    */
   function populateDropdown(boxId) {
     const dropdown = document.getElementById(boxId + 'Dropdown');
@@ -1631,15 +1952,41 @@
       row.innerHTML = `<span class="flag-icon">${flagSvg(lang.iso)}</span><span>${lang.name}</span>`;
       row.addEventListener('click', e => {
         e.stopPropagation();
-        setLanguageBox(boxId, lang.name);
-        // A running session is locked to the pair it was started with,
-        // so end it here rather than letting the user keep translating
-        // in the old direction while the UI claims otherwise.
-        endSessionForConfigChange();
+        selectLanguage(boxId, lang.name);
         closeAllDropdowns();
       });
       dropdown.appendChild(row);
     });
+  }
+
+  /**
+   * selectLanguage(boxId, langName)
+   * Usage: called when the user clicks a row in either language
+   * dropdown. Sets that box to langName and ends any running session,
+   * since a live session is locked to the pair it started with.
+   *
+   * If langName is what the OTHER box already holds, the two are
+   * swapped rather than both ending up on the same language. Picking
+   * "Spanish" in From when To is already Spanish means "translate out
+   * of Spanish" — the only coherent reading is that To should become
+   * whatever From was. This is the whole same-language defence now: an
+   * identical pair is never reachable, and no language ever has to be
+   * hidden from a picker to achieve that.
+   */
+  function selectLanguage(boxId, langName) {
+    const otherBoxId = boxId === 'langFrom' ? 'langTo' : 'langFrom';
+    const currentName = document.querySelector('#' + boxId + ' .lang-name').textContent;
+    const otherName = document.querySelector('#' + otherBoxId + ' .lang-name').textContent;
+
+    if (langName === currentName) return;  // no-op; don't tear down a session for a re-pick
+
+    if (langName === otherName) setLanguageBox(otherBoxId, currentName);
+    setLanguageBox(boxId, langName);
+
+    // A running session is locked to the pair it was started with, so
+    // end it here rather than letting the user keep translating in the
+    // old direction while the UI claims otherwise.
+    endSessionForConfigChange();
   }
 
   /**
@@ -1708,39 +2055,68 @@
     endSessionForConfigChange();
   });
 
-  /**
-   * populateSettingsMicDropdown()
-   * Usage: called each time the Settings page loads. Fetches the real
-   * device list and current saved preference, builds the dropdown, and
-   * reflects the currently-selected device's name in the select box.
-   */
-  function populateSettingsMicDropdown() {
-    Promise.all([callApi('list_microphones'), callApi('get_app_settings')]).then(([devices, settings]) => {
-      if (!devices || !devices.length) return;
-      const savedIndex = settings ? settings.microphone_device_index : null;
-      const dropdown = document.getElementById('settingsMicSelectDropdown');
-      dropdown.innerHTML = '';
-      let selected = devices.find(d => d.index === savedIndex) || devices.find(d => d.is_default) || devices[0];
-      document.getElementById('settingsMicName').textContent = selected.name;
+  // The Font Style select reuses the language selects' open/close
+  // wiring; only the rows inside it differ.
+  populateFontDropdown();
+  setupLanguageDropdown('fontFamilyBox');
+  setFontFamily(currentFontFamily);
 
-      devices.forEach(device => {
-        const row = document.createElement('div');
-        row.className = 'lang-option' + (device.index === selected.index ? ' selected' : '');
-        row.textContent = device.name + (device.is_default ? ' (Default)' : '');
-        row.addEventListener('click', e => {
-          e.stopPropagation();
-          document.getElementById('settingsMicName').textContent = device.name;
-          callApi('save_app_settings', { microphone_device_index: device.index });
-          // device_index is also a start_session() argument, so the
-          // running session keeps using the old mic until it ends.
-          endSessionForConfigChange();
-          closeAllDropdowns();
-        });
-        dropdown.appendChild(row);
-      });
+  /**
+   * window.setMicrophoneName(name)
+   * Usage: called from JS below after polling, AND called BY PYTHON
+   * (api.py's _push_device_change, via evaluate_js) the moment a live
+   * session moves itself onto a different microphone. Writes the name
+   * into BOTH places it is shown — the Settings page's Microphone
+   * display and the Live Translation panel's status line — so the two
+   * can never disagree about which mic is in use.
+   *
+   * Exposed on `window` rather than kept local specifically so Python
+   * can reach it: a hot-swap mid-session needs to appear immediately,
+   * not up to a poll interval later. Pass null when no microphone
+   * could be opened at all, which is shown as such rather than leaving
+   * the name of a device that has been unplugged.
+   */
+  window.setMicrophoneName = function (name) {
+    const label = name || 'No microphone found';
+    const settingsLabel = document.getElementById('settingsMicName');
+    if (settingsLabel) settingsLabel.textContent = label;
+    const liveLabel = document.getElementById('liveMicName');
+    if (liveLabel) liveLabel.textContent = label;
+  };
+
+  /**
+   * pollDefaultMicrophone()
+   * Usage: called once immediately, then re-run on a timer (see
+   * setInterval below) for as long as the app is open. Fetches the
+   * real device list from Python and displays whichever one is flagged
+   * is_default, so the app always shows Windows' CURRENT default input
+   * — including if the user unplugs a headset or changes it in
+   * Windows' Sound settings while the app is running, without needing
+   * a restart or any manual picker (that's the whole point of polling
+   * instead of the old pick-once dropdown).
+   *
+   * The poll alone is not enough, and used to be all there was. Python
+   * caches the hardware list, so this could only ever report devices
+   * that existed when the app launched (see audio.refresh_devices) —
+   * list_microphones() now forces a re-enumeration for exactly this
+   * reason. And while a session is recording, re-enumerating would
+   * abort the recording, so it is skipped; in that window the pipeline
+   * pushes the name here directly instead, through setMicrophoneName
+   * above.
+   */
+  function pollDefaultMicrophone() {
+    callApi('list_microphones').then(devices => {
+      if (!devices || !devices.length) return;
+      const def = devices.find(d => d.is_default) || devices[0];
+      window.setMicrophoneName(def.name);
     });
   }
-  setupLanguageDropdown('settingsMicSelect');
+  pollDefaultMicrophone();
+  // 3s is frequent enough to feel "live" without hammering the API
+  // bridge every render frame — a device swap in Windows is a
+  // deliberate, infrequent action, not something that needs
+  // sub-second reaction time here.
+  setInterval(pollDefaultMicrophone, 3000);
 
   /**
    * Deactivate this device: frees the license seat on the server and
@@ -1874,19 +2250,26 @@
     setListening(listening);
 
     if (listening && !sessionStarted) {
-      // Use the persisted engine/microphone preferences from Settings
-      // rather than hardcoded defaults, so a choice made there actually
-      // takes effect on the next session.
+      // Use the persisted engine preference from Settings rather than
+      // a hardcoded default, so a choice made there actually takes
+      // effect on the next session.
       callApi('get_app_settings').then(settings => {
         const engineMode = (settings && settings.engine_mode) || 'auto';
-        const micIndex = settings ? settings.microphone_device_index : null;
+        // Always null: the Settings page no longer lets a specific
+        // device be pinned (see pollDefaultMicrophone()) — the mic is
+        // always whatever Windows currently reports as its default,
+        // and passing null here is exactly what tells start_session()/
+        // pipeline.start() to resolve that via
+        // audio.get_default_input_device_index() rather than a
+        // possibly-stale saved index.
+        const micIndex = null;
         // Usage: shared by both the normal (resolved-but-not-ok) and
         // the .catch() (rejected, e.g. an uncaught Python exception)
         // paths below, so a failed session always resets the UI back
         // to idle and always shows *some* message — previously an
         // uncaught exception in start_session left the button stuck
         // showing "Listening" forever with no feedback at all.
-        function revertToIdle(error) {
+        function revertToIdle(error, detail) {
           listening = false;
           sessionStarted = false;
           activeLangs = null;  // nothing is running, so nothing to compare against
@@ -1897,10 +2280,19 @@
             no_engine_in_plan: 'No translation engine is available on your current plan.',
             not_licensed: 'Your license isn\u2019t active. Please reactivate.',
             mic_start_failed: 'Couldn\u2019t open the microphone. Check it in Settings.',
+            // Generic fallback only — offline startup can fail for
+            // reasons that have nothing to do with a missing package
+            // (e.g. a hung network call; see pipeline.py's
+            // OFFLINE_ENGINE_START_TIMEOUT_SECONDS). `detail`, when
+            // present, is the actual reason from the Python side and
+            // is shown in place of this guess rather than alongside
+            // it, so the message on screen is never wrong about WHY.
             offline_engine_unavailable: 'Offline engine isn\u2019t installed for this language pair.',
           };
           const statusText = document.getElementById('statusText');
-          statusText.textContent = messages[error] || 'Couldn\u2019t start the session.';
+          statusText.textContent = (error === 'offline_engine_unavailable' && detail)
+            ? `Offline engine failed to start: ${detail}`
+            : (messages[error] || 'Couldn\u2019t start the session.');
         }
 
         callApi('start_session', from, to, micIndex, engineMode).then(result => {
@@ -1910,7 +2302,7 @@
           // plan), revert the UI back to idle rather than showing
           // "Listening" for a session that never actually started.
           if (!result || !result.ok) {
-            revertToIdle(result && result.error);
+            revertToIdle(result && result.error, result && result.detail);
           }
         }).catch(() => revertToIdle());
       });
@@ -1956,27 +2348,11 @@
       appearance: currentAppearance,
       textColor: currentTextColor,
       fontSize: currentFontSize,
+      fontFamily: currentFontFamily,
       displayMode: currentDisplayMode,
     });
   }
   document.getElementById('maximizeBtn').addEventListener('click', openTranslationWindow);
-
-  /**
-   * loadMicrophones()
-   * Usage: called once on load. Fetches the real input device list from
-   * Python and swaps the static "Default Device" label for the OS's
-   * actual default input, so the settings panel reflects real hardware
-   * instead of a placeholder.
-   */
-  function loadMicrophones() {
-    callApi('list_microphones').then(devices => {
-      if (!devices || !devices.length) return;
-      const def = devices.find(d => d.is_default) || devices[0];
-      const label = document.querySelector('.mic-device b');
-      if (label) label.textContent = def.name;
-    });
-  }
-  loadMicrophones();
 
   /**
    * showLicenseGate(errorMessage, reason)
@@ -2051,6 +2427,29 @@
     document.getElementById('updateToast').classList.add('hidden');
   });
 
+  /**
+   * openBrandSite()
+   * Usage: bound to the MithraCorp logo/wordmark in the sidebar footer
+   * (id="brandLink"). Opens mithracorp.com in the user's DEFAULT
+   * BROWSER via api.py's open_external_link(), which calls
+   * webbrowser.open() — deliberately not in this window, which has no
+   * back button, no address bar and no way to return to the app if it
+   * navigated away from index.html.
+   *
+   * Same one-line pattern as the other outbound links in this file
+   * (the update banner, and the license gate's purchase/renew/contact
+   * links), so there is one route out to the web and one place to
+   * change if it ever needs to do more than hand off a URL.
+   */
+  function openBrandSite() {
+    callApi('open_external_link', 'https://mithracorp.com');
+  }
+  document.getElementById('brandLink').addEventListener('click', openBrandSite);
+
+  document.getElementById('licensePurchaseLink').addEventListener('click', e => {
+    e.preventDefault();
+    callApi('open_external_link', 'https://mithracorp.com/mithravoice.html#pricing');
+  });
   document.getElementById('licenseRenewLink').addEventListener('click', e => {
     e.preventDefault();
     callApi('open_external_link', 'https://mithracorp.com/mithravoice.html');
@@ -2166,37 +2565,55 @@
    * a session is live), and navigator.onLine, which covers the idle
    * case when no session is running to report anything.
    */
-  function setNetIndicator(isOnline) {
+  /**
+   * setNetIndicator(state)
+   * Usage: internal — paints the globe pill. Accepts either a boolean
+   * (legacy callers: true='online', false='offline') or one of the
+   * strings 'online' | 'offline' | 'connecting'. 'connecting' is the
+   * transient amber state while the pipeline is actively switching
+   * engines — neither the online nor the offline claim is true yet.
+   */
+  function setNetIndicator(state) {
     const pill = document.getElementById('netPill');
     if (!pill) return;
-    pill.classList.toggle('online', !!isOnline);
-    pill.classList.toggle('offline', !isOnline);
-    pill.title = isOnline
+    if (typeof state === 'boolean') state = state ? 'online' : 'offline';
+    pill.classList.toggle('online', state === 'online');
+    pill.classList.toggle('offline', state === 'offline');
+    pill.classList.toggle('connecting', state === 'connecting');
+    pill.title = state === 'online'
       ? 'Connected \u2014 online engine available'
-      : 'No connection \u2014 offline engine only';
+      : state === 'connecting'
+        ? 'Switching engines\u2026'
+        : 'No connection \u2014 offline engine only';
   }
 
   /**
    * window.setEngineBadge(mode)
    * Usage: called BY PYTHON when the pipeline switches between "online"
    * and "offline" engines (including an automatic mid-session fallback
-   * if the internet drops), or "failed" when the offline fallback could
-   * not start either. Updates the status pill's label so the user knows
-   * translation is still running, just locally — or that it has stopped
-   * and why. Also tracks currentEngineMode so the usage countdown below
-   * only ticks down while the metered online engine (not the free
-   * offline one) is actually active, and drives the connectivity globe.
+   * if the internet drops), "connecting" while that switch is actively
+   * in progress (fired the instant a drop or a recovery attempt is
+   * detected, BEFORE the new engine has actually started — see
+   * pipeline.py's _restart_on_offline / _try_restore_online — so the
+   * user is never staring at a stale "Listening…" over a session that's
+   * silently mid-transition), or "failed" when the offline fallback
+   * could not start either. Updates the status pill's label so the user
+   * knows translation is still running, just locally — or that it has
+   * stopped and why. Also tracks currentEngineMode so the usage
+   * countdown below only ticks down while the metered online engine
+   * (not the free offline one) is actually active, and drives the
+   * connectivity globe.
    */
   let currentEngineMode = null;  // null until the first session sets it — treated same as 'offline' (shows ∞)
   window.setEngineBadge = function (mode) {
     currentEngineMode = mode;
-    setNetIndicator(mode === 'online');
     const statusText = document.getElementById('statusText');
     if (mode === 'failed') {
       // Both engines are down — Azure was unreachable AND the offline
       // engine couldn't start (see pipeline.py's _restart_on_offline).
       // Nothing is transcribing, so say so rather than leaving
       // "Listening…" up over a dead session.
+      setNetIndicator('offline');
       listening = false;
       sessionStarted = false;
       activeLangs = null;
@@ -2204,21 +2621,76 @@
       statusText.textContent = 'Translation stopped \u2014 no engine available';
       return;
     }
+    if (mode === 'connecting') {
+      // Transient — no claim about which engine is active yet, so the
+      // usage pill/countdown are left exactly as they were rather than
+      // recalculated for a mode that isn't settled.
+      setNetIndicator('connecting');
+      statusText.textContent = listening ? 'Connecting\u2026' : 'Paused';
+      return;
+    }
+    setNetIndicator(mode === 'online');
     const base = listening ? 'Listening…' : 'Paused';
     statusText.textContent = mode === 'offline' ? base + ' (Offline)' : base;
+    // The pill is hidden entirely unless the ONLINE engine is active,
+    // so every mode change is a moment its contents become relevant or
+    // irrelevant. Repaint from what's already known, then ask Python
+    // for a fresh figure — without this, going online repainted the
+    // badge instantly and left the remaining time blank until the next
+    // poll came round.
+    renderUsagePill();
+    loadUsageStatus();
   };
 
-  // Idle-state connectivity: while no session is running there's no
-  // engine to report a mode, so fall back to the browser's own view.
-  // The poll backstops the events — WebView2 does not always fire them
-  // for adapter-level changes like toggling Wi-Fi off.
-  setNetIndicator(navigator.onLine);
-  window.addEventListener('offline', () => setNetIndicator(false));
-  window.addEventListener('online', () => { if (!sessionStarted) setNetIndicator(true); });
-  setInterval(() => {
+  /**
+   * window.setIdleConnectivity(online)
+   * Usage: called BY PYTHON (see api.py's _push_connectivity) whenever
+   * a real reachability probe flips. Only paints the globe while no
+   * session is running — once one is, setEngineBadge() is reporting
+   * which engine is genuinely active, which is a stronger claim than
+   * "the network looks up" and must not be overwritten by it.
+   */
+  window.setIdleConnectivity = function (online) {
+    if (sessionStarted && currentEngineMode) return;
+    setNetIndicator(!!online);
+  };
+
+  /**
+   * refreshIdleConnectivity()
+   * Usage: asks Python to probe the Azure speech endpoint and paints
+   * the idle globe with the answer.
+   *
+   * This replaces navigator.onLine, which was the reason the globe
+   * could sit green while the online engine refused to run: that flag
+   * reports whether a network interface exists, not whether anything
+   * is reachable through it. It is true on a VPN that routes nothing,
+   * behind a proxy that blocks WebSockets, and on a captive-portal
+   * Wi-Fi that hasn't been paid for. The browser's online/offline
+   * EVENTS are still worth listening to — they're a reliable hint that
+   * something changed — but the answer to "what changed" comes from
+   * the probe, not from them.
+   */
+  function refreshIdleConnectivity() {
     if (sessionStarted && currentEngineMode) return;  // engine state wins while a session is live
-    setNetIndicator(navigator.onLine);
-  }, 4000);
+    callApi('check_connectivity').then(result => {
+      if (result && typeof result.online === 'boolean') {
+        setNetIndicator(result.online);
+      }
+    }).catch(() => { /* probe failed to run; leave the last known state alone */ });
+  }
+
+  // First paint uses the browser's guess so the globe isn't blank for
+  // the moment the probe takes, then the real answer replaces it.
+  setNetIndicator(navigator.onLine);
+  refreshIdleConnectivity();
+  window.addEventListener('offline', () => setNetIndicator(false));
+  window.addEventListener('online', refreshIdleConnectivity);
+  // Backstop poll: WebView2 does not reliably fire the events above for
+  // adapter-level changes like toggling Wi-Fi off. Slower than the old
+  // 4s tick because each pass is a real TLS handshake rather than
+  // reading a flag, and connectivity.py caches within that window
+  // anyway.
+  setInterval(refreshIdleConnectivity, 10000);
 
   /**
    * Online-hours countdown (see usage.py / api.py's get_usage_status())
@@ -2292,24 +2764,31 @@
   }
 
   /**
-   * loadUsageStatus()
-   * Usage: called once on load and every USAGE_POLL_MS afterward.
-   * get_usage_status() returns null before the online engine has ever
-   * run this session, or for plans with no monthly cap — renderUsagePill()
-   * shows "∞" for both of those, same as it does for offline mode.
+   * window.applyUsageStatus(status)
+   * Usage: called BY PYTHON (see api.py's _push_usage_status) as soon
+   * as a usage snapshot changes, and by loadUsageStatus() below with
+   * the result of a poll. A null status — or one with no monthly cap —
+   * leaves the pill showing the unlimited symbol, same as offline mode.
+   *
+   * Exists so the number doesn't have to wait for a poll boundary. The
+   * pill was previously poll-only, so on the first online session of a
+   * run it could sit blank for most of USAGE_POLL_MS after Python
+   * already knew the answer.
    */
-  function loadUsageStatus() {
-    callApi('get_usage_status').then(status => {
-      if (!status || status.seconds_included === null || status.seconds_included === undefined) {
-        usageRemainingSeconds = null;
-        usageIncludedSeconds = null;
-        renderUsagePill();
-        return;
-      }
-      usageIncludedSeconds = status.seconds_included;
-      usageRemainingSeconds = status.seconds_remaining;
+  window.applyUsageStatus = function (status) {
+    if (!status || status.seconds_included === null || status.seconds_included === undefined) {
+      usageRemainingSeconds = null;
+      usageIncludedSeconds = null;
       renderUsagePill();
-    });
+      return;
+    }
+    usageIncludedSeconds = status.seconds_included;
+    usageRemainingSeconds = status.seconds_remaining;
+    renderUsagePill();
+  };
+
+  function loadUsageStatus() {
+    callApi('get_usage_status').then(window.applyUsageStatus);
   }
   loadUsageStatus();
   setInterval(loadUsageStatus, USAGE_POLL_MS);

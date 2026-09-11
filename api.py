@@ -44,6 +44,7 @@ from licensing import (
     get_cached_license_status,
     get_cached_token,
 )
+import connectivity
 from pipeline import TranslationPipeline
 from updater import check_for_update as _check_for_update
 from updater import get_current_version
@@ -84,41 +85,67 @@ TRANSLATION_FRAMELESS = True
 # HOW THIS ACTUALLY WORKS, because it is not obvious and the obvious
 # version does not work. Three layers have to cooperate:
 #
-#   1. The PAGE must paint nothing (translation.html keeps html/body
-#      transparent). Anything the page paints is drawn by WebView2.
-#   2. WEBVIEW2 must have DefaultBackgroundColor = Transparent so it
-#      composites nothing of its own. pywebview sets this when the
-#      window is created with transparent=True, and this half works.
-#   3. The FORM behind WebView2 paints TRANSLATION_KEY_COLOR, and that
-#      colour is punched out of the window with
-#      SetLayeredWindowAttributes.
-#
-# The key must be painted by the FORM, never by the page. WebView2
-# renders through DirectComposition, on top of the layered window
-# surface, and that content is NOT subject to the parent's colour key.
-# Painting the key colour in CSS produces a window that is genuinely
-# click-through — Windows keys the form underneath — while WebView2
-# cheerfully paints the colour straight back over the hole, so it
-# looks solid and behaves transparent. That exact symptom is what led
-# here.
-#
-# pywebview is supposed to do step 3 too, but on this build it does
-# not: the form's background measured (240,240,240), SystemColors
-# .Control, i.e. never assigned. So step 3 is done here by hand, in
-# _paint_form_background() and _apply_color_key().
+#   1. The PAGE must paint with alpha where it wants to see through
+#      (translation.html keeps html/body transparent and gives the
+#      caption panel an rgba() background).
+#   2. WEBVIEW2 must have DefaultBackgroundColor = Transparent, which
+#      makes it composite its content OVER the host window's own
+#      pixels instead of over opaque white. pywebview sets this when
+#      the window is created with transparent=True.
+#   3. The WINDOW must be one that can actually hold transparent
+#      pixels. That is what TRANSLATION_TRANSPARENCY_MODE selects.
 TRANSLATION_TRANSPARENT = True
 
-# The colour the FORM paints and Windows punches out. A near-black
-# nothing else uses, rather than the conventional magenta or red:
-#   - If any step above fails, the window falls back to showing this
-#     colour flat. Near-black reads as the app's normal dark
-#     background; magenta would be a screenful of eye-searing pink.
-#   - The caption text is outlined in pure black (#000). Antialiased
-#     pixels along that outline blend toward whatever is behind, and
-#     blending black into near-black is invisible.
-# Nothing in translation.html may paint this colour.
-TRANSLATION_KEY_COLOR = (1, 2, 3)
-TRANSLATION_KEY_COLOR_HEX = "#010203"
+# "dwm" | "colorkey" | "off". This is the single most consequential
+# setting in this file; the two modes are not variations on a theme,
+# they are different mechanisms with different capabilities.
+#
+# "dwm" — DwmExtendFrameIntoClientArea with margins of -1 ("sheet of
+#   glass"), which asks the desktop compositor to treat the window's
+#   whole client area as frame and honour a real alpha channel in it.
+#   WebView2 renders through DirectComposition with per-pixel alpha, so
+#   the page's rgba() values survive all the way to the screen: a panel
+#   at 55% black is genuinely 55% black over the user's slides. The
+#   form's own GDI-painted background carries no alpha and is therefore
+#   composited away entirely, which is what leaves the margin around
+#   the panel see-through.
+#
+# "colorkey" — the previous mechanism: SetLayeredWindowAttributes with
+#   LWA_COLORKEY, punching out every pixel matching an agreed colour.
+#   Kept as a fallback for machines where DWM composition is disabled,
+#   but it has two limitations that are properties of the mechanism and
+#   cannot be worked around from CSS:
+#
+#     * Transparency is BINARY. A pixel either matches the key exactly
+#       and vanishes, or it doesn't and is fully opaque. A panel drawn
+#       at 55% black composites against the key colour to something
+#       that is not the key colour, so it comes out as a solid dark
+#       slab. That is why Custom used to render as flat black and Light
+#       as flat white instead of showing through.
+#     * Keyed pixels are CLICK-THROUGH, and hit-testing reads the
+#       layered surface the form painted — not the DirectComposition
+#       content WebView2 drew on top of it. The form paints nothing but
+#       the key colour, so the ENTIRE window was click-through no
+#       matter what the page displayed, which is why the close button
+#       in the corner did nothing at all: the click was landing on
+#       whatever application was behind the strip.
+#
+#   Both of those are fixed by "dwm", which is why it is the default.
+TRANSLATION_TRANSPARENCY_MODE = "dwm"
+
+# What the FORM paints behind WebView2.
+#
+# Under "dwm" this must be pure black: GDI writes no alpha channel, so
+# the compositor reads these pixels as fully transparent and drops
+# them — black specifically because any colour bleeding through an
+# imperfect composite is least visible as black, and because if DWM
+# composition is off entirely the window degrades to a plain dark strip
+# with legible captions rather than to something garish.
+#
+# Under "colorkey" this is the colour punched out, and must be a shade
+# nothing in translation.html paints.
+TRANSLATION_KEY_COLOR = (0, 0, 0) if TRANSLATION_TRANSPARENCY_MODE == "dwm" else (1, 2, 3)
+TRANSLATION_KEY_COLOR_HEX = "#000000" if TRANSLATION_TRANSPARENCY_MODE == "dwm" else "#010203"
 
 # Keep the strip above every other window while it is open, so the
 # captions stay readable over whatever is being presented.
@@ -212,7 +239,7 @@ def _screen_rects():
     try:
         screens = list(webview.screens)
     except Exception as exc:  # noqa: BLE001 - a display query must never block opening the window
-        print(f"[TRANSLATION] could not query screens: {exc!r}", flush=True)
+        log(f"[TRANSLATION] could not query screens: {exc!r}")
         return []
 
     rects = []
@@ -255,25 +282,24 @@ def _work_area_for_window(window) -> tuple:
     """
     rects = _screen_rects()
     if not rects:
-        print("[TRANSLATION] no screens reported; falling back to 1920x1080", flush=True)
+        log("[TRANSLATION] no screens reported; falling back to 1920x1080")
         return 0, 0, 1920, 1080
 
     try:
         cx = window.x + window.width // 2
         cy = window.y + window.height // 2
     except Exception as exc:  # noqa: BLE001 - position unreadable; primary is a fine default
-        print(f"[TRANSLATION] could not read main window position ({exc!r}); using primary display", flush=True)
+        log(f"[TRANSLATION] could not read main window position ({exc!r}); using primary display")
         return rects[0]
 
     for index, (rx, ry, rw, rh) in enumerate(rects):
         if rx <= cx < rx + rw and ry <= cy < ry + rh:
             if index != 0:
-                print(f"[TRANSLATION] main window is on display {index + 1} of {len(rects)}", flush=True)
+                log(f"[TRANSLATION] main window is on display {index + 1} of {len(rects)}")
             return rx, ry, rw, rh
 
-    print(
+    log(
         f"[TRANSLATION] main window centre ({cx},{cy}) matched no display; using primary",
-        flush=True,
     )
     return rects[0]
 
@@ -313,11 +339,10 @@ def _bottom_strip_geometry(window):
     create_width = int(round(width / scale))
     create_height = int(round(height / scale))
 
-    print(
+    log(
         f"[TRANSLATION] work area {area_w}x{area_h} at ({area_x},{area_y}), scaling {scale:g}x "
         f"-> bottom 1/{TRANSLATION_SCREEN_DIVISIONS} strip {width}x{height} at ({x},{y}) "
         f"(requesting {create_width}x{create_height})",
-        flush=True,
     )
     return x, y, width, height, create_width, create_height, scale
 
@@ -412,12 +437,12 @@ def _paint_form_background(window, rgb) -> bool:
         from System import Action
         from System.Drawing import Color
     except Exception as exc:  # noqa: BLE001 - not Windows, or internals moved
-        print(f"[TRANSLATION] cannot reach WinForms internals ({exc!r}); skipping form background", flush=True)
+        log(f"[TRANSLATION] cannot reach WinForms internals ({exc!r}); skipping form background")
         return False
 
     form = BrowserView.instances.get(getattr(window, "uid", None))
     if form is None:
-        print("[TRANSLATION] no BrowserView instance for the Translation window", flush=True)
+        log("[TRANSLATION] no BrowserView instance for the Translation window")
         return False
 
     red, green, blue = rgb
@@ -431,11 +456,108 @@ def _paint_form_background(window, rgb) -> bool:
             form.Invoke(Action(_assign))
         else:
             _assign()
-        print(f"[TRANSLATION] form background painted rgb{tuple(rgb)}", flush=True)
+        log(f"[TRANSLATION] form background painted rgb{tuple(rgb)}")
         return True
     except Exception as exc:  # noqa: BLE001 - cosmetic; never take the app down for it
-        print(f"[TRANSLATION] could not set form background: {exc!r}", flush=True)
+        log(f"[TRANSLATION] could not set form background: {exc!r}")
         return False
+
+
+def _apply_dwm_transparency(hwnd) -> bool:
+    """
+    _apply_dwm_transparency(hwnd)
+    Usage: called from _apply_window_transparency() when
+    TRANSLATION_TRANSPARENCY_MODE is "dwm". Asks the desktop compositor
+    to extend the window frame across the entire client area, which
+    makes the window honour a real per-pixel alpha channel. Returns
+    True if DWM accepted it.
+
+    The margins are all -1, which is the documented "sheet of glass"
+    special case: rather than extending the frame by N pixels on each
+    edge, it extends it over the whole client area at once. Anything
+    subsequently drawn into that area with an alpha value below 255
+    blends with the desktop underneath instead of with an opaque window
+    background — which is precisely what the caption panel needs and
+    what a colour key structurally cannot do.
+
+    Two things have to be true for this to produce anything visible,
+    and both are arranged elsewhere:
+      - WebView2's DefaultBackgroundColor must be Transparent, so the
+        page's own alpha reaches the compositor rather than being
+        flattened onto opaque white first. pywebview does this when the
+        window is created with transparent=True.
+      - The form behind it must paint pure black. GDI writes no alpha,
+        so those pixels read as fully transparent and are composited
+        out; see _paint_form_background and TRANSLATION_KEY_COLOR.
+
+    Unlike the colour key this adds no WS_EX_LAYERED style and makes
+    nothing click-through, so the window hit-tests normally and the
+    close button in translation.html actually receives its clicks.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class _MARGINS(ctypes.Structure):
+        _fields_ = [
+            ("cxLeftWidth", ctypes.c_int),
+            ("cxRightWidth", ctypes.c_int),
+            ("cyTopHeight", ctypes.c_int),
+            ("cyBottomHeight", ctypes.c_int),
+        ]
+
+    try:
+        dwmapi = ctypes.windll.dwmapi
+    except Exception as exc:  # noqa: BLE001 - no DWM (very old or stripped Windows)
+        log(f"[TRANSLATION] dwmapi unavailable ({exc!r}); strip will be opaque")
+        return False
+
+    # Composition can be switched off system-wide. Asking first turns a
+    # silent "the window is just black" into a line in the log.
+    enabled = wintypes.BOOL()
+    try:
+        dwmapi.DwmIsCompositionEnabled(ctypes.byref(enabled))
+        if not enabled.value:
+            log("[TRANSLATION] DWM composition is disabled; strip will be opaque")
+            return False
+    except Exception:
+        pass  # older signatures; fall through and let the extend call be the test
+
+    margins = _MARGINS(-1, -1, -1, -1)
+    try:
+        result = dwmapi.DwmExtendFrameIntoClientArea(wintypes.HWND(hwnd), ctypes.byref(margins))
+    except Exception as exc:  # noqa: BLE001 - cosmetic; never take the app down for it
+        log(f"[TRANSLATION] DwmExtendFrameIntoClientArea raised: {exc!r}")
+        return False
+
+    ok = (result == 0)
+    log(
+        f"[TRANSLATION] DWM per-pixel alpha: {'applied' if ok else f'FAILED (hr=0x{result & 0xFFFFFFFF:08x})'}",
+    )
+    return ok
+
+
+def _apply_window_transparency(hwnd) -> bool:
+    """
+    _apply_window_transparency(hwnd)
+    Usage: called from _force_window_rect() once the Translation window
+    has been found, before it is positioned. Dispatches to whichever
+    mechanism TRANSLATION_TRANSPARENCY_MODE selects, so the rest of the
+    file never has to care which one is in use. Returns True if any
+    transparency was applied.
+
+    Falls back from "dwm" to the colour key automatically if DWM
+    refuses, rather than leaving a flat opaque strip: the colour key is
+    a worse mechanism (see the constant's comment) but a strip with a
+    see-through margin and a solid caption panel still beats a solid
+    black rectangle across the bottom of someone's presentation.
+    """
+    if not TRANSLATION_TRANSPARENT or TRANSLATION_TRANSPARENCY_MODE == "off":
+        return False
+    if TRANSLATION_TRANSPARENCY_MODE == "dwm":
+        if _apply_dwm_transparency(hwnd):
+            return True
+        log("[TRANSLATION] falling back to colour-key transparency")
+    return _apply_color_key(hwnd)
 
 
 def _apply_color_key(hwnd) -> bool:
@@ -493,10 +615,9 @@ def _apply_color_key(hwnd) -> bool:
         user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED)
 
     ok = bool(user32.SetLayeredWindowAttributes(hwnd, colorref, 0, LWA_COLORKEY))
-    print(
+    log(
         f"[TRANSLATION] colour key rgb{TRANSLATION_KEY_COLOR} "
         f"(COLORREF 0x{colorref:06x}): {'applied' if ok else 'FAILED — window will show a flat ' + TRANSLATION_KEY_COLOR_HEX}",
-        flush=True,
     )
     return ok
 
@@ -566,7 +687,7 @@ def _force_window_rect(title: str, x: int, y: int, width: int, height: int):
     user32.EnumWindows(WNDENUMPROC(_enum), 0)
 
     if not found:
-        print(f"[TRANSLATION] no window titled {title!r} owned by this process; leaving geometry alone", flush=True)
+        log(f"[TRANSLATION] no window titled {title!r} owned by this process; leaving geometry alone")
         return None
 
     hwnd = found[0]
@@ -575,11 +696,10 @@ def _force_window_rect(title: str, x: int, y: int, width: int, height: int):
     user32.GetWindowRect(hwnd, ctypes.byref(before))
 
     if TRANSLATION_TRANSPARENT:
-        # Order matters only in that both must happen before the
-        # window is next painted; the key is what makes the colour
-        # disappear, the colour is what gives the key something to
-        # match.
-        _apply_color_key(hwnd)
+        # Must happen before the window is next painted. The form's
+        # background colour has already been set by the caller; this is
+        # the step that makes the compositor honour it.
+        _apply_window_transparency(hwnd)
 
     SWP_SHOWWINDOW = 0x0040
     SWP_FRAMECHANGED = 0x0020
@@ -600,14 +720,50 @@ def _force_window_rect(title: str, x: int, y: int, width: int, height: int):
     after = wintypes.RECT()
     user32.GetWindowRect(hwnd, ctypes.byref(after))
 
-    print(
+    log(
         f"[TRANSLATION] placement: was ({before.left},{before.top})-({before.right},{before.bottom}) "
         f"-> now ({after.left},{after.top})-({after.right},{after.bottom}) "
         f"[wanted ({x},{y}) {width}x{height}]"
         + (", topmost" if TRANSLATION_ALWAYS_ON_TOP else ""),
-        flush=True,
     )
     return hwnd
+
+
+def log(message: str) -> None:
+    """
+    log(message)
+    Usage: use instead of print() anywhere in this module. Same
+    behavior, except it can never raise.
+
+    print() to a dead stdout raises OSError: [WinError 1] Incorrect
+    function on Windows. That is not hypothetical here — it happened
+    inside start_session()'s own exception handler, so the app crashed
+    while trying to REPORT a crash, and the resulting traceback pointed
+    at traceback.py rather than at anything to do with the real fault.
+    Every windowed build has this failure mode: pythonw.exe has no
+    console at all, and a console the user closed leaves an invalid
+    handle behind. A logging call is never important enough to take the
+    process down, least of all on the error path.
+    """
+    try:
+        print(message, flush=True)
+    except OSError:
+        pass  # no usable stdout (pythonw, or the console went away)
+
+
+def log_exception(context: str = "") -> None:
+    """
+    log_exception(context="")
+    Usage: use instead of traceback.print_exc(). Formats the current
+    exception into a string and hands it to log(), so a broken stdout
+    degrades to silence rather than raising a second, unrelated
+    exception on top of the one being reported.
+    """
+    try:
+        text = traceback.format_exc()
+    except Exception:  # noqa: BLE001 - there is no exception to format
+        return
+    log(f"{context}\n{text}" if context else text)
 
 
 def _log_click(func):
@@ -624,7 +780,7 @@ def _log_click(func):
     @functools.wraps(func)
     def wrapper(self, *args, **kwargs):
         arg_bits = [repr(a) for a in args] + [f"{k}={v!r}" for k, v in kwargs.items()]
-        print(f"[BUTTON] {func.__name__}({', '.join(arg_bits)})", flush=True)
+        log(f"[BUTTON] {func.__name__}({', '.join(arg_bits)})")
         return func(self, *args, **kwargs)
     return wrapper
 
@@ -639,6 +795,19 @@ class Api:
 
     def __init__(self) -> None:
         self._window = None
+        # False once exit_app() has started tearing the main window
+        # down, or before attach_window() has run. Checked by
+        # _safe_eval_js() before every push into the UI.
+        #
+        # Guarding on `self._window is not None` alone was not enough:
+        # destroy() does not clear the reference, and the pushes that
+        # crash on a dead window come from background threads —
+        # _push_audio_level fires ~10x/second off the audio callback —
+        # so there is always one already in flight when the window
+        # goes. It arrives at a disposed WebView2 and raises
+        # System.ObjectDisposedException out through pywebview's own
+        # thread, which is the error at the tail of a clean exit.
+        self._window_alive = False
         # The second, full-screen captions window opened by the stage's
         # "Full Screen" button (translation.html — see
         # open_translation_window). None whenever it isn't open, which
@@ -669,6 +838,7 @@ class Api:
             on_result=self._push_result,
             on_engine_change=self._push_engine_change,
             on_level=self._push_audio_level,
+            on_device_change=self._push_device_change,
         )
         # Prune old history on every launch according to whatever the
         # retention preference currently is, so files don't accumulate
@@ -693,6 +863,54 @@ class Api:
         # offline engine or no session at all is active.
         threading.Thread(target=self._usage_flush_loop, daemon=True).start()
 
+        # --- Idle connectivity indicator (see connectivity.py) ---
+        # While a session is live the pipeline reports which engine is
+        # really running, and that is the authoritative answer. While
+        # no session is running there is no engine to ask, and the UI
+        # used to fall back to navigator.onLine — which reports whether
+        # a network adapter is up, not whether Azure can be reached. It
+        # reads "connected" on a VPN routing nothing, behind a proxy
+        # that blocks WebSockets, and on an unpaid captive-portal
+        # Wi-Fi. This monitor probes the real speech endpoint instead,
+        # so the globe means the same thing before a session as during
+        # one.
+        self._connectivity_monitor = connectivity.ConnectivityMonitor(on_change=self._push_connectivity)
+        self._connectivity_monitor.start()
+
+    def _push_connectivity(self, online: bool) -> None:
+        """
+        _push_connectivity(online)
+        Usage: internal — ConnectivityMonitor's on_change callback,
+        fired only when reachability actually flips. Pushes the new
+        state into the UI so the idle globe reflects a real probe.
+
+        Deliberately does nothing while a session is running: the
+        pipeline is reporting the live engine in that case, and letting
+        a background probe overwrite it would make the globe flicker
+        between "the network is up" and "the engine that is genuinely
+        running right now", which are different claims.
+        """
+        if self._window is None:
+            return
+        try:
+            self._safe_eval_js(f"window.setIdleConnectivity({json.dumps(bool(online))})")
+        except Exception as exc:  # noqa: BLE001 - an indicator update is never worth raising over
+            log(f"[api] could not push connectivity state to UI: {exc!r}")
+
+    @_log_click
+    def check_connectivity(self, force: bool = True):
+        """
+        check_connectivity(force=True)
+        Usage (JS): window.pywebview.api.check_connectivity().then(r => ...)
+        Returns {"online": bool, "host": str} after probing the Azure
+        speech endpoint for real. Called by the UI on launch (once the
+        user is logged in) so the very first thing shown is a measured
+        answer rather than navigator.onLine's guess, and again whenever
+        the browser reports a network event — which is a useful hint
+        that something changed, but not evidence of what.
+        """
+        return {"online": connectivity.is_online(force=force), "host": connectivity.speech_host()}
+
     def attach_window(self, window) -> None:
         """
         attach_window(window)
@@ -701,6 +919,47 @@ class Api:
         evaluate_js. Must happen before any translation session starts.
         """
         self._window = window
+        self._window_alive = True
+
+    def _safe_eval_js(self, script: str, window=None) -> None:
+        """
+        _safe_eval_js(script, window=None)
+        Usage: internal — use for EVERY Python -> JS push instead of
+        calling window.evaluate_js() directly. Defaults to the main
+        window; pass one explicitly for the Translation window.
+
+        Two things it absorbs, both of which are normal rather than
+        exceptional:
+
+          * the window is gone. Closing the app disposes the WebView2
+            control, but the threads pushing into it — the audio level
+            meter, the pipeline's engine-change notifications, the
+            capture loop — don't stop at the same instant, so the last
+            few pushes always arrive at a disposed object. That raised
+            System.ObjectDisposedException out of pywebview's internals
+            on every clean exit.
+          * the JS side isn't ready. evaluate_js before index.html has
+            defined its hooks throws from inside the page, not from
+            here, but the failure looks the same to a caller.
+
+        A dropped caption frame or level update is worth nothing; the
+        next one is 100ms away. Neither is worth an exception crossing
+        the bridge, so failures are logged once per window and then
+        swallowed.
+        """
+        target = window if window is not None else self._window
+        if target is None or (window is None and not self._window_alive):
+            return
+        try:
+            target.evaluate_js(script)
+        except Exception as exc:  # noqa: BLE001 - window closing/closed; nothing to recover
+            if window is None:
+                # A failure on the main window means it's on its way
+                # out. Latch that so the remaining in-flight pushes
+                # from other threads return immediately instead of each
+                # raising and logging their own copy of the same error.
+                self._window_alive = False
+            log(f"[ui] push to a closing window failed (harmless): {exc!r}")
 
     def _push_result(self, result: TranslationResult) -> None:
         """
@@ -730,7 +989,7 @@ class Api:
         script = f"window.updateSubtitle({original}, {translated}, {is_final})"
         self._last_subtitle = script
         if self._window is not None:
-            self._window.evaluate_js(script)
+            self._safe_eval_js(script)
         self._push_to_translation_window(script)
 
     def _push_engine_change(self, mode: str) -> None:
@@ -746,10 +1005,16 @@ class Api:
         if mode == "online":
             self._start_online_tracking()
         else:
-            self._flush_online_usage()
+            # blocking=False because this runs on the pipeline's own
+            # thread — during start_session(), that's the pywebview
+            # bridge call the UI is waiting on. A usage report is an
+            # HTTP POST with an 8-second timeout, and letting it sit in
+            # front of the badge update meant the engine could be live
+            # and translating while the UI still showed the old state.
+            self._flush_online_usage(blocking=False)
         if self._window is None:
             return
-        self._window.evaluate_js(f"window.setEngineBadge({json.dumps(mode)})")
+        self._safe_eval_js(f"window.setEngineBadge({json.dumps(mode)})")
 
     def _start_online_tracking(self) -> None:
         """
@@ -770,11 +1035,56 @@ class Api:
                 self._online_started_at = time.monotonic()
         if already_tracking or self._latest_usage_snapshot is not None:
             return
-        cached_status = get_cached_license_status()
-        snapshot = usage.report_usage(get_cached_token(), 0, plan_code=cached_status.plan_code)
-        self._latest_usage_snapshot = snapshot
+        # Seeded on a background thread, not inline. This is the very
+        # first online session of a run, so there's no cached snapshot
+        # and this call has to reach the license server — up to eight
+        # seconds of timeout sitting directly in the path of
+        # start_session(). Inline, it delayed the whole session start;
+        # the remaining-time pill then waited out a further poll
+        # interval on top of that, which is why the number took so long
+        # to appear. Off-thread, the session starts immediately and the
+        # pill fills in the moment the answer lands.
+        threading.Thread(target=self._seed_usage_snapshot, daemon=True).start()
 
-    def _flush_online_usage(self) -> Optional[dict]:
+    def _seed_usage_snapshot(self) -> None:
+        """
+        _seed_usage_snapshot()
+        Usage: internal — background body for _start_online_tracking()'s
+        first-run seed. Reports zero seconds (which the server treats as
+        "just tell me the current totals") and pushes the answer straight
+        to the UI rather than leaving it for the next poll.
+        """
+        try:
+            cached_status = get_cached_license_status()
+            snapshot = usage.report_usage(get_cached_token(), 0, plan_code=cached_status.plan_code)
+        except Exception as exc:  # noqa: BLE001 - a usage seed must never take down the app
+            log(f"[USAGE] could not seed the usage snapshot: {exc!r}")
+            return
+        self._latest_usage_snapshot = snapshot
+        self._push_usage_status()
+
+    def _push_usage_status(self) -> None:
+        """
+        _push_usage_status()
+        Usage: internal — pushes the current usage snapshot into the UI
+        the moment it changes, instead of leaving the pill to discover
+        it on its next 20-second poll.
+
+        The pill used to be poll-only, so even after Python knew the
+        remaining time, the number could sit at the placeholder for
+        another full interval. Polling still runs as a backstop; this
+        just means the common case (an online session starting) updates
+        at once.
+        """
+        if self._window is None:
+            return
+        try:
+            payload = json.dumps(self._usage_snapshot_to_dict(self._latest_usage_snapshot))
+            self._safe_eval_js(f"window.applyUsageStatus && window.applyUsageStatus({payload})")
+        except Exception as exc:  # noqa: BLE001 - a pill update is never worth raising over
+            log(f"[USAGE] could not push usage status to UI: {exc!r}")
+
+    def _flush_online_usage(self, blocking: bool = True) -> Optional[dict]:
         """
         _flush_online_usage()
         Usage: internal — reports however many seconds have elapsed
@@ -796,9 +1106,35 @@ class Api:
             elapsed = time.monotonic() - self._online_started_at
             self._online_started_at = time.monotonic()
 
+        # The elapsed calculation and the clock reset above stay
+        # synchronous and under the lock even when the REPORT is
+        # deferred. Moving them into the background thread too would
+        # let time keep accruing until that thread was scheduled, and
+        # that time would be billed to the user — a metered plan can't
+        # absorb that kind of drift. What gets deferred is only the
+        # network round trip.
+        if not blocking:
+            threading.Thread(target=self._report_usage_delta, args=(elapsed,), daemon=True).start()
+            return None
+        return self._report_usage_delta(elapsed)
+
+    def _report_usage_delta(self, elapsed: float) -> Optional[dict]:
+        """
+        _report_usage_delta(elapsed)
+        Usage: internal — sends `elapsed` seconds of online time to the
+        license server, stores the returned snapshot, enforces the quota
+        if the server says it's exhausted, and pushes the new number to
+        the UI. Called inline by _flush_online_usage() or on a
+        background thread when the caller can't afford to wait.
+        """
         cached_status = get_cached_license_status()
-        snapshot = usage.report_usage(get_cached_token(), elapsed, plan_code=cached_status.plan_code)
+        try:
+            snapshot = usage.report_usage(get_cached_token(), elapsed, plan_code=cached_status.plan_code)
+        except Exception as exc:  # noqa: BLE001 - reporting usage must never take down a session
+            log(f"[USAGE] report failed: {exc!r}")
+            return None
         self._latest_usage_snapshot = snapshot
+        self._push_usage_status()
         if snapshot is not None and snapshot.exceeded:
             self._on_usage_exceeded()
         return self._usage_snapshot_to_dict(snapshot)
@@ -843,7 +1179,7 @@ class Api:
             self._online_started_at = None
         self._pipeline.stop()
         if self._window is not None:
-            self._window.evaluate_js("window.onOnlineQuotaExceeded && window.onOnlineQuotaExceeded()")
+            self._safe_eval_js("window.onOnlineQuotaExceeded && window.onOnlineQuotaExceeded()")
 
     def _usage_flush_loop(self) -> None:
         """
@@ -861,7 +1197,7 @@ class Api:
             try:
                 self._flush_online_usage()
             except Exception as exc:
-                print(f"[USAGE] periodic flush failed: {exc!r}", flush=True)
+                log(f"[USAGE] periodic flush failed: {exc!r}")
 
     @staticmethod
     def _usage_snapshot_to_dict(snapshot: Optional[usage.UsageSnapshot]) -> Optional[dict]:
@@ -913,7 +1249,7 @@ class Api:
         """
         if self._window is None:
             return
-        self._window.evaluate_js(f"window.updateAudioLevel({level:.3f})")
+        self._safe_eval_js(f"window.updateAudioLevel({level:.3f})")
 
     # ---- Methods callable from JS ----
 
@@ -994,13 +1330,51 @@ class Api:
             self._latest_usage_snapshot = None
         return {"ok": result.ok, "error": result.error}
 
+    def _push_device_change(self, device: Optional[dict]) -> None:
+        """
+        _push_device_change(device)
+        Usage: internal — the pipeline's on_device_change callback,
+        fired when a live session moved itself onto a different
+        microphone (the Windows default changed, or the old device was
+        unplugged and the stream was reopened — see
+        TranslationPipeline._swap_microphone). Pushes the new name
+        straight into the UI rather than waiting for the next poll, so
+        the Live Translation status line and the Settings page update
+        the moment the swap happens instead of up to a poll interval
+        later.
+
+        device is None when no microphone could be opened at all; the
+        UI shows that as "No microphone found" rather than leaving the
+        name of a device that is no longer plugged in.
+        """
+        if self._window is None:
+            return
+        name = device["name"] if device else None
+        try:
+            self._safe_eval_js(f"window.setMicrophoneName({json.dumps(name)})")
+        except Exception as exc:  # noqa: BLE001 - a label update is never worth killing the audio thread for
+            log(f"[api] could not push microphone name to UI: {exc!r}")
+
     def list_microphones(self) -> list:
         """
         list_microphones()
         Usage (JS): window.pywebview.api.list_microphones().then(devices => ...)
-        Returns the list used to populate the Microphone selector.
+        Returns the list the UI reads the current default microphone's
+        name out of, on both the Settings page and the Live Translation
+        status line.
+
+        Asks for a refreshed list rather than the cached one, because
+        this is called on a timer specifically to notice hardware
+        changes — and PortAudio's device list is frozen at startup
+        until something forces it to re-enumerate (see
+        audio.refresh_devices). Without the refresh the poll could run
+        forever and never report a mic the user plugged in after
+        launch, which is exactly what it was there to catch. The
+        refresh no-ops harmlessly while a session is recording; the
+        pipeline pushes the name directly in that case (see
+        _push_device_change).
         """
-        return list_input_devices()
+        return list_input_devices(refresh=True)
 
     @_log_click
     def start_session(self, from_lang: str, to_lang: str, device_index: Optional[int] = None, mode: str = "auto"):
@@ -1033,8 +1407,17 @@ class Api:
         if mode == "auto":
             if status.online_allowed and not status.offline_allowed:
                 mode = "online"  # no offline entitlement — pipeline must not silently fall back to it
+                log(f"[api] plan {status.plan_code!r} is online-only; no offline fallback available")
             elif status.offline_allowed and not status.online_allowed:
                 mode = "offline"  # no online entitlement — never even attempt Azure
+                # Printed because this clamp is otherwise completely
+                # invisible: the pipeline is handed "offline", so it
+                # reports offline correctly and never logs a failure —
+                # there wasn't one. From the outside it looks identical
+                # to Azure being unreachable, which sends you chasing
+                # network problems that don't exist. Say plainly that
+                # the plan, not the connection, is what decided this.
+                log(f"[api] plan {status.plan_code!r} does not include the online engine; forcing offline")
             elif not status.online_allowed and not status.offline_allowed:
                 return {"ok": False, "error": "no_engine_in_plan"}
             # else: both allowed, "auto" proceeds as normal (try online, fall back to offline)
@@ -1070,7 +1453,7 @@ class Api:
             # raises here before the mic is ever opened, and reporting
             # that as "mic_start_failed" sent users to check their
             # microphone for a problem that has nothing to do with it.
-            traceback.print_exc()
+            log_exception()
             return {"ok": False, "error": "offline_engine_unavailable", "detail": str(exc)}
         except Exception as exc:  # noqa: BLE001 - any mic/engine start failure must surface to the UI, never crash the bridge call
             # Print the full traceback to the console the app was
@@ -1078,7 +1461,7 @@ class Api:
             # message (see index.html's mic_start_failed), so this is
             # the only place the real cause (which device, which
             # PortAudio error code, etc.) is visible for debugging.
-            traceback.print_exc()
+            log_exception()
             return {"ok": False, "error": "mic_start_failed", "detail": str(exc)}
         return {"ok": True}
 
@@ -1268,6 +1651,12 @@ class Api:
                 "textColor": view_settings.get("textColor", "white"),
                 "fontSize": view_settings.get("fontSize", 24),
                 "displayMode": view_settings.get("displayMode", "both"),
+                # Font family travels as the CSS stack itself rather
+                # than a short key, so adding a font to the picker in
+                # index.html needs no matching change here or in
+                # translation.html — the two stay in sync by having
+                # only one place that knows the list.
+                "fontFamily": view_settings.get("fontFamily", ""),
             })
             self._translation_window = webview.create_window(
                 "Translation",
@@ -1376,10 +1765,9 @@ class Api:
 
         drift = actual_width / target_width
         verdict = "matches" if abs(drift - 1.0) <= 0.15 else "MISMATCH"
-        print(
+        log(
             f"[TRANSLATION] content size: {css_width}css x {ratio}dpr = {actual_width:.0f}px "
             f"vs {target_width}px wanted ({verdict}, ratio {drift:.2f})",
-            flush=True,
         )
         return {"ok": True}
 
@@ -1429,10 +1817,12 @@ class Api:
         x, y, width, height = geometry
 
         if TRANSLATION_TRANSPARENT:
-            # Give the colour key something to match. Done here rather
-            # than at creation because it needs the Form to exist, and
-            # before placement so the window is never painted grey
-            # even briefly.
+            # Under "dwm" this is the alpha-less black the compositor
+            # drops; under "colorkey" it's the shade the key matches.
+            # Either way it's done here rather than at creation because
+            # it needs the Form to exist, and before placement so the
+            # window is never painted the .NET default grey even
+            # briefly.
             _paint_form_background(self._translation_window, TRANSLATION_KEY_COLOR)
 
         def _place():
@@ -1444,10 +1834,10 @@ class Api:
                             self._start_topmost_watchdog(hwnd)
                         return
                 except Exception as exc:  # noqa: BLE001 - placement is cosmetic; never take the app down for it
-                    print(f"[TRANSLATION] placement failed: {exc!r}", flush=True)
+                    log(f"[TRANSLATION] placement failed: {exc!r}")
                     return
                 time.sleep(0.1)
-            print("[TRANSLATION] gave up looking for the window to place", flush=True)
+            log("[TRANSLATION] gave up looking for the window to place")
 
         threading.Thread(target=_place, daemon=True).start()
 
@@ -1490,14 +1880,13 @@ class Api:
                     if not _reassert_topmost(hwnd):
                         return
                 except Exception as exc:  # noqa: BLE001 - never take the app down over z-order
-                    print(f"[TRANSLATION] topmost watchdog stopping: {exc!r}", flush=True)
+                    log(f"[TRANSLATION] topmost watchdog stopping: {exc!r}")
                     return
 
         threading.Thread(target=_watch, daemon=True).start()
-        print(
+        log(
             f"[TRANSLATION] holding on top, re-asserted every "
             f"{TRANSLATION_TOPMOST_INTERVAL_SECONDS:g}s",
-            flush=True,
         )
 
     def _stop_topmost_watchdog(self):
@@ -1525,10 +1914,7 @@ class Api:
         window = self._translation_window
         if window is None:
             return
-        try:
-            window.evaluate_js(script)
-        except Exception as exc:  # noqa: BLE001 - window closed mid-push; nothing to recover
-            print(f"[TRANSLATION] push failed (window likely closed): {exc!r}", flush=True)
+        self._safe_eval_js(script, window=window)
 
     def _push_last_subtitle_to_translation(self):
         """
@@ -1571,9 +1957,46 @@ class Api:
         main window itself — destroy() fires the window's `closed`
         event, and _on_translation_closed above is what does the
         restoring, so every dismissal path ends up in exactly one place.
+
+        The handle is claimed (set to None) BEFORE destroy() rather than
+        after, which makes a second call a silent no-op instead of an
+        exception. Destroying a window is asynchronous — pywebview
+        marshals it onto the WinForms UI thread — so two calls a few
+        milliseconds apart both used to find a live-looking handle, and
+        the second one reached a Form that had already been disposed:
+
+            System.ObjectDisposedException: Cannot access a disposed
+            object. Object name: 'Form'.
+
+        The double call came from duplicate event listeners in
+        translation.html (since removed), but the guard stays: this is a
+        public bridge method, anything on the page can call it, and it
+        should not be possible to make the app throw by clicking twice.
+
+        Claiming the handle early has a second benefit — _push_result()
+        is still running on the engine thread and checks this same
+        attribute, so it stops aiming captions at a window that is on
+        its way out.
+
+        If destroy() does fail, _on_translation_closed() is invoked by
+        hand: that is normally driven by the `closed` event, which will
+        never arrive for a window that was never destroyed, and skipping
+        it would leave the main window minimized with no visible way to
+        bring it back.
         """
-        if self._translation_window is not None:
-            self._translation_window.destroy()
+        window = self._translation_window
+        if window is None:
+            return {"ok": True, "already_closed": True}
+
+        self._translation_window = None
+        try:
+            window.destroy()
+        except Exception as exc:  # noqa: BLE001 - already-disposed window, or a backend that refused
+            log(f"[TRANSLATION] destroy() failed (window likely already gone): {exc!r}")
+            # Idempotent: safe even if the real `closed` event also
+            # fires, in which case the main window is simply restored
+            # twice, which is a no-op.
+            self._on_translation_closed()
         return {"ok": True}
 
     @_log_click
@@ -1600,11 +2023,39 @@ class Api:
             self._flush_online_usage()
         except Exception:
             pass  # never block quitting the app over a usage-reporting hiccup
-        if self._translation_window is not None:
-            self._translation_window.destroy()
-            self._translation_window = None
+
+        # Stop the session BEFORE anything is destroyed. The mic
+        # callback and the pipeline watchdog are what generate pushes
+        # into the UI, and leaving them running across destroy() is
+        # what guaranteed at least one evaluate_js landed on a disposed
+        # WebView2 every single time the app closed.
+        try:
+            self._pipeline.stop()
+        except Exception:  # noqa: BLE001 - quitting; a teardown error helps nobody
+            log_exception("[api] error stopping the pipeline during exit")
+
+        # Latched before destroy(), not after: _safe_eval_js checks this
+        # flag, so anything still in flight on another thread now
+        # returns immediately instead of racing the teardown.
+        self._window_alive = False
+
+        # Same claim-then-destroy shape as close_translation_window, and
+        # for the same reason: the user can hit Exit while a close is
+        # already in flight (or with the strip's own X), and a disposed
+        # Form must not raise on the way out. Quitting is the last place
+        # an exception is any use to anyone.
+        window = self._translation_window
+        self._translation_window = None
+        if window is not None:
+            try:
+                window.destroy()
+            except Exception as exc:  # noqa: BLE001 - already gone; nothing left to close
+                log(f"[TRANSLATION] destroy() during exit failed: {exc!r}")
         if self._window is not None:
-            self._window.destroy()
+            try:
+                self._window.destroy()
+            except Exception as exc:  # noqa: BLE001 - already gone
+                log(f"[api] destroy() on the main window failed: {exc!r}")
 
     @_log_click
     def open_external_link(self, url: str):
@@ -1694,10 +2145,10 @@ class Api:
         try:
             from window_capture import WindowCaptureStream
         except ImportError as exc:
-            print(f"[capture] window_capture unavailable on this platform: {exc}")
+            log(f"[capture] window_capture unavailable on this platform: {exc}")
             return {"ok": False, "error": "unsupported_platform"}
 
-        print(f"[capture] starting capture for window id {window_id}")
+        log(f"[capture] starting capture for window id {window_id}")
         self._stop_capture_stream()
         self._logged_first_push = False
         self._capture_stream = WindowCaptureStream(window_id, on_frame=self._push_captured_frame)
@@ -1715,7 +2166,7 @@ class Api:
         """
         self._stop_capture_stream()
         if self._window is not None:
-            self._window.evaluate_js("window.clearCapturedFrame && window.clearCapturedFrame()")
+            self._safe_eval_js("window.clearCapturedFrame && window.clearCapturedFrame()")
         return {"ok": True}
 
     def _stop_capture_stream(self) -> None:
@@ -1742,10 +2193,10 @@ class Api:
         """
         if self._window is None:
             if not self._logged_no_window_warning:
-                print("[capture] got a frame but self._window is None — can't push it anywhere")
+                log("[capture] got a frame but self._window is None — can't push it anywhere")
                 self._logged_no_window_warning = True
             return
         if not self._logged_first_push:
-            print(f"[capture] pushing first frame to main window via evaluate_js ({len(data_url)} chars)")
+            log(f"[capture] pushing first frame to main window via evaluate_js ({len(data_url)} chars)")
             self._logged_first_push = True
-        self._window.evaluate_js(f"window.updateCapturedFrame({json.dumps(data_url)})")
+        self._safe_eval_js(f"window.updateCapturedFrame({json.dumps(data_url)})")

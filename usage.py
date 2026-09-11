@@ -43,6 +43,7 @@ from typing import Optional
 
 import requests
 
+import connectivity
 from config import settings
 
 # Mirrors mithracorp.com/mithravoice.html#pricing's online plans.
@@ -56,6 +57,53 @@ PLAN_INCLUDED_HOURS = {
     "online_silver_monthly": 25,
     "online_gold_monthly": 40,
 }
+
+# Back-off schedule for a license server that isn't answering, in
+# seconds since the last failed attempt. Consecutive failures walk down
+# this list and stay at the last entry.
+#
+# Without a back-off, report_usage() retried at full rate against a
+# host that could not even be resolved. Each attempt cost a DNS
+# timeout, and each printed a ~400-character traceback-laden line — so
+# an offline session produced a steady scroll of identical failures
+# that buried the [pipeline]/[azure] messages actually worth reading,
+# for no benefit whatsoever: nothing about the outcome changes between
+# one failed DNS lookup and the next one a second later. Usage is never
+# lost by waiting, since the delta accumulates in pending_seconds and
+# is reconciled on the next successful report.
+_RETRY_BACKOFF_SECONDS = (0.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0)
+
+# Consecutive failed reports, and the monotonic() of the most recent
+# attempt. Reset to zero the moment any report succeeds.
+_consecutive_failures = 0
+_last_attempt_at = 0.0
+
+
+def _should_attempt_server() -> bool:
+    """
+    _should_attempt_server()
+    Usage: internal — True when enough time has passed since the last
+    failed report to be worth trying the license server again. Always
+    True while things are healthy, so a working setup pays nothing for
+    this.
+    """
+    if _consecutive_failures == 0:
+        return True
+    index = min(_consecutive_failures, len(_RETRY_BACKOFF_SECONDS) - 1)
+    return (time.monotonic() - _last_attempt_at) >= _RETRY_BACKOFF_SECONDS[index]
+
+
+def _note_attempt(succeeded: bool) -> None:
+    """
+    _note_attempt(succeeded)
+    Usage: internal — records the outcome of one server attempt so
+    _should_attempt_server() can pace the next one. A single success
+    clears the back-off entirely, so recovery from a network blip is
+    immediate rather than having to work back up the schedule.
+    """
+    global _consecutive_failures, _last_attempt_at
+    _last_attempt_at = time.monotonic()
+    _consecutive_failures = 0 if succeeded else _consecutive_failures + 1
 
 
 @dataclass
@@ -167,6 +215,36 @@ def _local_fallback_snapshot(plan_code: Optional[str], seconds_delta: float) -> 
     )
 
 
+def _bank_locally(seconds_delta: float, plan_code: Optional[str]) -> Optional[UsageSnapshot]:
+    """
+    _bank_locally(seconds_delta, plan_code)
+    Usage: internal — the "couldn't reach the server this time" path,
+    shared by all three reasons that happens (no network, backing off,
+    or the request itself failed). Adds seconds_delta to the cached
+    snapshot's pending_seconds and returns an OPTIMISTIC snapshot —
+    last known remaining minus everything pending, clamped at 0 — so
+    the on-screen countdown keeps ticking smoothly instead of freezing
+    or jumping. The real total is reconciled by the next successful
+    report; nothing is ever lost by not calling the server right now.
+
+    Returns None only when there is no cache AND plan_code doesn't map
+    to a known capped plan, i.e. there is genuinely nothing to show.
+    """
+    cached = get_cached_usage_snapshot()
+    if cached is None:
+        fallback = _local_fallback_snapshot(plan_code, seconds_delta)
+        if fallback is not None:
+            _save_snapshot(fallback)
+        return fallback
+
+    cached.pending_seconds += seconds_delta
+    if cached.seconds_remaining is not None:
+        cached.seconds_remaining = max(0, cached.seconds_remaining - int(seconds_delta))
+        cached.seconds_used += int(seconds_delta)
+    _save_snapshot(cached)
+    return cached
+
+
 def report_usage(token: Optional[str], seconds_delta: float, plan_code: Optional[str] = None) -> Optional[UsageSnapshot]:
     """
     report_usage(token, seconds_delta, plan_code=None)
@@ -183,15 +261,17 @@ def report_usage(token: Optional[str], seconds_delta: float, plan_code: Optional
     replaces the cache, with pending_seconds reset to 0.
 
     On failure (offline, server unreachable, or /v1/usage/report not
-    implemented yet): seconds_delta is added to the cached
-    pending_seconds instead of being lost, and an OPTIMISTIC snapshot
-    is returned — last known seconds_remaining minus total pending,
-    clamped at 0 — so the on-screen countdown keeps ticking smoothly
-    through a brief network blip rather than freezing or jumping. The
-    real total gets reconciled with the server on the next successful
-    report. If there's no cache at all yet, falls back to
-    _local_fallback_snapshot() so there's still something real to show
-    rather than nothing.
+    implemented yet): the call is banked locally instead of being lost
+    — see _bank_locally() — and an optimistic snapshot is returned so
+    the on-screen countdown keeps ticking smoothly through a network
+    blip rather than freezing or jumping.
+
+    Skips the server entirely, taking that same banking path, when
+    connectivity.is_online() says there is nothing to reach, or when a
+    recent failure means we are still backing off (see
+    _RETRY_BACKOFF_SECONDS). Neither skip loses usage; both exist
+    because a doomed request costs a DNS timeout and a log line and
+    buys nothing.
 
     Returns None only when there's no cache, the server call failed,
     AND plan_code doesn't map to a known capped plan — i.e. genuinely
@@ -201,6 +281,24 @@ def report_usage(token: Optional[str], seconds_delta: float, plan_code: Optional
     if not token:
         print("[usage] report_usage called with no cached license token — skipping the server and returning whatever's cached, if anything", flush=True)
         return get_cached_usage_snapshot()
+
+    # Two cheap reasons not to call the server at all. Both take the
+    # same path as a failed call — the delta is banked in
+    # pending_seconds and reconciled later — so skipping costs nothing
+    # but a DNS timeout and a log line.
+    #
+    # The connectivity check matters most during exactly the situation
+    # these logs were captured in: a session that fell back to offline
+    # because the network went away. Usage isn't even accruing then
+    # (offline time is not metered — see the README's Usage Reporting
+    # table), so hammering an unresolvable hostname is pure noise.
+    if not _should_attempt_server():
+        return _bank_locally(seconds_delta, plan_code)
+    if not connectivity.is_online():
+        _note_attempt(succeeded=False)
+        if _consecutive_failures == 1:
+            print("[usage] no network; banking usage locally until the license server is reachable again", flush=True)
+        return _bank_locally(seconds_delta, plan_code)
 
     try:
         resp = requests.post(
@@ -224,20 +322,19 @@ def report_usage(token: Optional[str], seconds_delta: float, plan_code: Optional
         detail = ""
         if getattr(exc, "response", None) is not None:
             detail = f" — server responded {exc.response.status_code}: {exc.response.text[:300]!r}"
-        print(f"[usage] report_usage to {settings.license_server_url}/v1/usage/report failed, falling back to local estimate: {exc!r}{detail}", flush=True)
-        cached = get_cached_usage_snapshot()
-        if cached is None:
-            fallback = _local_fallback_snapshot(plan_code, seconds_delta)
-            if fallback is not None:
-                _save_snapshot(fallback)
-            return fallback
-        cached.pending_seconds += seconds_delta
-        if cached.seconds_remaining is not None:
-            cached.seconds_remaining = max(0, cached.seconds_remaining - int(seconds_delta))
-            cached.seconds_used += int(seconds_delta)
-        _save_snapshot(cached)
-        return cached
+        _note_attempt(succeeded=False)
+        # Logged on the first failure of a run only. Repeating an
+        # identical several-hundred-character line every few seconds
+        # for the whole duration of an outage doesn't add information,
+        # it just hides the [pipeline] and [azure] lines that do. The
+        # back-off (see _RETRY_BACKOFF_SECONDS) means later failures
+        # are also far rarer.
+        if _consecutive_failures == 1:
+            print(f"[usage] report_usage to {settings.license_server_url}/v1/usage/report failed, banking usage "
+                  f"locally and backing off: {exc!r}{detail}", flush=True)
+        return _bank_locally(seconds_delta, plan_code)
 
+    _note_attempt(succeeded=True)
     snapshot = UsageSnapshot(
         seconds_used=data.get("seconds_used", 0),
         seconds_included=data.get("seconds_included"),

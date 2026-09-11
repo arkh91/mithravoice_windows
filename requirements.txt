@@ -11,6 +11,12 @@ azure-cognitiveservices-speech>=1.34.0
 # Offline engine (fallback)
 faster-whisper>=1.0.1
 argostranslate>=1.9.6
+# stanza is already pulled in transitively by argostranslate (used for
+# sentence-boundary detection on some language packages — see
+# engines/offline_engine.py's module docstring), but is listed
+# explicitly here because scripts/prepare_offline_assets.py imports it
+# directly to pre-download its resources for a fully offline build.
+stanza>=1.8.0
 
 # Licensing
 pyjwt[crypto]>=2.8.0

@@ -48,6 +48,11 @@
 [Setup]
 AppId={{B7B6C6A1-4F1F-4E4C-9D2E-8C6C8E1E7A11}}
 AppName={#MyAppName}
+; Without this, Inno's default Programs-and-Features "Name" column
+; falls back to "{#MyAppName} {#MyAppVersion}" (e.g. "MithraVoice
+; 2.0.3") — pinning AppVerName to just the app name keeps that list
+; showing plain "MithraVoice" regardless of what VERSION currently is.
+AppVerName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
@@ -61,7 +66,14 @@ OutputBaseFilename=MithraVoice_Setup_{#MyAppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-; SetupIconFile=assets\mithravoice.ico   ; uncomment once you have an .ico
+; Icon for the installer wizard itself and the Setup_*.exe file.
+SetupIconFile=assets\mithracorp_logo.ico
+; Icon shown in Programs and Features next to "MithraVoice" — without
+; this, Windows falls back to a generic uninstaller icon instead of
+; the app's own. Points at the already-installed app .exe (which
+; carries the same icon via build.spec's icon= setting), so there's
+; nothing extra to keep in sync here.
+UninstallDisplayIcon={app}\{#MyAppExeName}
 PrivilegesRequired=lowest
 ArchitecturesInstallIn64BitMode=x64
 

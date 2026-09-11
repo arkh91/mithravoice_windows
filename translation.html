@@ -27,25 +27,30 @@
 
   Caption styling is NOT duplicated here as its own set of controls —
   it arrives as query-string params mirroring whatever Caption Style /
-  Display / Text Color is currently set on the main stage, and is
-  applied on load by applyStyleFromParams() below.
+  Display / Translation Style is currently set on the main stage, and
+  is applied on load by applyStyleFromParams() below.
 -->
 <style>
-  /* MUST paint nothing. Do not set a colour here, not even the key
-     colour api.py punches out.
+  /* TRANSPARENCY, and why the rules below are allowed to use rgba().
 
-     Anything the page paints is drawn by WebView2, which renders
-     through DirectComposition on top of the layered window surface
-     and is therefore NOT subject to the parent window's colour key.
-     Painting the key colour here produces a window that is genuinely
-     click-through — Windows keys the form underneath — while WebView2
-     paints the colour straight back over the hole. It looks solid and
-     behaves transparent, which is a confusing failure to diagnose.
+     This window is composited by DWM with a real per-pixel alpha
+     channel: api.py calls DwmExtendFrameIntoClientArea with "sheet of
+     glass" margins, the host form paints pure black (which carries no
+     alpha and is composited away), and WebView2 renders on top of that
+     with DefaultBackgroundColor = Transparent. The upshot is that
+     whatever alpha is written here survives all the way to the screen,
+     so a panel at 62% opacity is genuinely 62% opaque over the user's
+     slides.
 
-     Leaving this transparent means WebView2 composites nothing, the
-     form's own background shows through, and THAT is what gets keyed
-     out. See the mechanism note above TRANSLATION_TRANSPARENT in
-     api.py. */
+     This replaced a chroma-key scheme where transparency was BINARY —
+     a pixel either matched an agreed key colour exactly and vanished
+     or was fully opaque — which is why the Light theme used to render
+     as a solid white slab and Custom as a solid black one instead of
+     showing through. See TRANSLATION_TRANSPARENCY_MODE in api.py.
+
+     html/body still paint nothing at all: the caption panel is the
+     only visible surface, and everything around it is meant to be the
+     desktop. */
   html, body {
     margin: 0;
     padding: 0;
@@ -57,9 +62,9 @@
     color: #ffffff;
   }
 
-  /* Layout shell only — it paints nothing. The caption panel inside
-     is the sole visible surface; everything outside it is punched
-     through to the desktop. */
+  /* Layout shell only — it paints nothing. It positions the caption
+     panel vertically according to the Position setting; the panel
+     itself is what is visible. */
   .screen {
     position: relative;
     width: 100%;
@@ -67,51 +72,31 @@
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
-    /* Just enough inset for the panel's rounded corners and border to
-       read as a panel rather than a cut-off rectangle. Everything in
-       this margin is transparent, so it is the only part of the
-       window the desktop shows through. */
-    padding: 6px;
+    padding: 12px 18px;
     background: transparent;
   }
+  .screen.pos-top    { justify-content: flex-start; }
+  .screen.pos-center { justify-content: center; }
+  .screen.pos-bottom { justify-content: flex-end; }
 
-  /* The panel fills the window rather than hugging its text, so the
-     caption occupies the strip the user positioned instead of
-     floating in the middle of it. flex:1 takes all remaining height;
-     the Position setting now places the TEXT within the panel (see
-     the .screen.pos-* rules below) rather than the panel within the
-     window, which it no longer needs to do. */
+  /* The panel hugs its text rather than filling the strip, so it reads
+     as a caption card sitting over the desktop instead of a bar ruled
+     across the bottom of the screen. Centred horizontally with a
+     max-width so a long sentence wraps into a tidy block rather than
+     running the full width of a projector.
+
+     Right padding is the largest so the text clears the close button
+     in the corner when the panel happens to be full width. */
   .box {
-    flex: 1;
-    width: 100%;
+    align-self: center;
+    max-width: min(94%, 1500px);
     box-sizing: border-box;
-    display: flex;
-    flex-direction: column;
     text-align: center;
-    /* Right padding is the largest so the caption text clears the
-       close button in the corner. */
-    padding: clamp(10px, 3%, 24px) clamp(48px, 5%, 64px) clamp(10px, 3%, 24px) clamp(16px, 3%, 40px);
-    border-radius: 10px;
-    /* No background and no border by default, so the transparent
-       page shows through and the form's keyed-out background does
-       too.
-
-       Transparency here is BINARY: Windows removes only the pixels
-       that are exactly the key colour the form painted. A
-       partly-transparent panel does not blend with the desktop — the
-       fraction of it that WebView2 draws is opaque, so it reads as a
-       dark film. Nothing drawn over the see-through area should use
-       fractional alpha, an opacity below 1, or a blurred shadow,
-       which is why the text outline below is a hard opaque shadow and
-       the close button is dimmed by colour rather than opacity.
-
-       .light and .custom deliberately opt back into a solid panel. */
+    padding: clamp(12px, 2.5%, 26px) clamp(52px, 5%, 70px) clamp(12px, 2.5%, 26px) clamp(24px, 4%, 48px);
+    border-radius: 14px;
     background: none;
     border: none;
   }
-  .screen.pos-top    .box { justify-content: flex-start; }
-  .screen.pos-center .box { justify-content: center; }
-  .screen.pos-bottom .box { justify-content: flex-end; }
 
   .original,
   .translated {
@@ -131,43 +116,60 @@
     margin-top: 10px;
   }
 
-  /* Background themes — mirrors index.html's
-     .subtitle-box.dark/.light/.custom rules. */
-  /* Floating captions need their own contrast: with no panel behind
-     them the text can land on anything from a white slide to a busy
-     photo.
+  /* --- Background themes ---------------------------------------------
+     All three are see-through now; they differ in how much they darken
+     what is behind the text, not in whether they cover it.
 
-     This is an 8-direction HARD outline, not a soft glow, and the
-     shadow colours are fully opaque with a blur radius of 0 — because
-     a blurred shadow's faded outer pixels are partly transparent, and
-     partial transparency over a chroma-keyed window composites
-     against the key colour instead of the desktop. A soft halo would
-     therefore render as a red glow around every word. An opaque
-     outline has no partial pixels except the glyph's own
-     antialiasing. Only applied to the transparent theme — .light and
-     .custom have a solid panel doing this job already. */
-  .box.dark.text-white .original,
-  .box.dark.text-white .translated {
+     dark   — a translucent dark card. The default: readable over a
+              white slide and over a photo, without hiding either.
+     light  — no panel at all, just the text floating on the desktop.
+              (It is "light" in the sense of adding nothing, and is the
+              option to pick when the caption must obscure as little of
+              the presentation as possible.)
+     custom — the same idea as dark but warmer, with the app's gold
+              edge, for when the strip should read as part of the
+              branding rather than disappearing. */
+  .box.dark {
+    background: rgba(8, 10, 14, 0.62);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+  }
+  .box.light {
+    background: transparent;
+    border: none;
+  }
+  .box.custom {
+    background: rgba(26, 21, 10, 0.66);
+    border: 1px solid rgba(232, 183, 58, 0.55);
+  }
+
+  /* Legibility treatment depends on whether there is a panel behind
+     the text.
+
+     With no panel (light), the text can land on anything from a white
+     slide to a busy photograph, so it gets an 8-direction hard outline
+     in the opposite colour — the only treatment that stays readable on
+     an arbitrary background.
+
+     With a panel (dark/custom), the panel is already doing that job
+     and a hard outline would look heavy-handed, so those get an
+     ordinary soft shadow for a little separation. */
+  .box.light.text-white .original,
+  .box.light.text-white .translated {
     text-shadow:
       -2px -2px 0 #000, 0 -2px 0 #000, 2px -2px 0 #000,
       -2px  0   0 #000,               2px  0   0 #000,
       -2px  2px 0 #000, 0  2px 0 #000, 2px  2px 0 #000;
   }
-  .box.dark.text-black .original,
-  .box.dark.text-black .translated {
+  .box.light.text-black .original,
+  .box.light.text-black .translated {
     text-shadow:
       -2px -2px 0 #fff, 0 -2px 0 #fff, 2px -2px 0 #fff,
       -2px  0   0 #fff,               2px  0   0 #fff,
       -2px  2px 0 #fff, 0  2px 0 #fff, 2px  2px 0 #fff;
   }
-
-  .box.light {
-    background: #ffffff;
-    border: 1px solid rgba(0,0,0,0.15);
-  }
-  .box.custom {
-    background: #10151e;
-    border: 1px solid rgba(232,183,58,0.35);
+  .box.dark .original,   .box.dark .translated,
+  .box.custom .original, .box.custom .translated {
+    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.75);
   }
 
   /* Text color is deliberately independent of the background theme,
@@ -177,37 +179,52 @@
   .box.text-white { color: #ffffff; }
   .box.text-black { color: #111111; }
 
-  /* Interim (not yet finalized) results are dimmed with a solid
-     colour rather than opacity, for the same reason as everything
-     else on this page: a half-transparent line over a chroma-keyed
-     window reads as red, not faded. */
-  .box.text-white .interim { color: #c4cad4; }
+  /* Interim (not yet finalized) results are dimmed with a solid colour
+     rather than opacity, so the dimming reads the same whether or not
+     there is a panel behind the text. */
+  .box.text-white .interim { color: #c9cfd9; }
   .box.text-black .interim { color: #4d4d4d; }
 
+  /* The placeholder shown before the first result arrives. Dimmed the
+     same way an interim result is, so it is visibly not a translation
+     of anything yet. */
+  .placeholder .original,
+  .placeholder .translated { opacity: 0.75; }
+
+  /* The close button and the Esc key are the ONLY ways out of this
+     window — api.py creates it frameless, so there is no OS title bar
+     and no system close button.
+
+     This used to be unclickable, and not because of anything in this
+     file: the window was made transparent with a colour key, which
+     also makes every keyed pixel click-through, and hit-testing reads
+     the host form's surface rather than the content WebView2 draws on
+     top of it. The form painted nothing but the key colour, so the
+     whole window passed clicks straight through to the application
+     behind it and this button could never receive one. The DWM
+     transparency this window now uses adds no such behaviour, so the
+     window hit-tests normally. See api.py's
+     TRANSLATION_TRANSPARENCY_MODE.
+
+     Sized generously and given a solid background so it is an easy
+     target against a busy desktop. */
   .close-btn {
     position: absolute;
-    top: 14px;
-    right: 16px;
-    width: 34px;
-    height: 34px;
+    top: 12px;
+    right: 14px;
+    width: 40px;
+    height: 40px;
     border-radius: 50%;
-    /* Solid, not translucent: anything semi-transparent over the
-       keyed-out area composites against the key colour and comes out
-       tinted red rather than see-through. */
-    background: #1b2029;
-    border: 1px solid #2b323f;
-    /* Subdued via COLOUR, never via opacity — a half-transparent
-       button over the keyed-out area would come out tinted red rather
-       than faded. Kept clearly visible regardless: with the title bar
-       gone, this and the Esc key are the only ways to close the
-       window. */
-    color: #8a919e;
-    font-size: 17px;
+    background: rgba(20, 24, 32, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    color: #d6dae2;
+    font-size: 19px;
+    line-height: 1;
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 5;
+    z-index: 10;
     transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
   }
   .close-btn:hover {
@@ -215,39 +232,38 @@
     border-color: #e8b73a;
     color: #e8b73a;
   }
+  .close-btn:active { transform: scale(0.94); }
 
   .hint {
     position: absolute;
-    top: 20px;
+    top: 18px;
     left: 50%;
     transform: translateX(-50%);
     font-size: 12px;
     letter-spacing: 0.06em;
     text-transform: uppercase;
-    color: #9aa0ab;
-  }
-  /* display, not a fade: an opacity transition would spend its whole
-     duration partly transparent, which over a chroma-keyed window
-     means visibly red rather than fading out. */
-  .hint.gone { display: none; }
-  .hint {
-    /* Sits inside the panel now that the panel fills the window, so
-       it needs to stay legible against it. */
-    z-index: 6;
-    background: #12161f;
-    padding: 3px 10px;
+    color: #cbd1da;
+    z-index: 9;
+    background: rgba(18, 22, 31, 0.9);
+    padding: 4px 12px;
     border-radius: 999px;
+    pointer-events: none;
   }
+  .hint.gone { display: none; }
 </style>
 </head>
 <body>
   <div class="screen pos-bottom" id="screen">
-    <button class="close-btn" id="closeBtn"
+    <button class="close-btn" id="closeBtn" type="button"
             title="Close the Translation window and restore MithraVoice">&#10005;</button>
     <div class="hint" id="hint">Press Esc to close</div>
-    <div class="box dark text-white" id="box">
-      <div class="original" id="orig" dir="auto">Waiting for speech…</div>
-      <div class="translated" id="trans" dir="auto"></div>
+    <!-- The placeholder text matches the main stage's, so opening full
+         screen before saying anything looks like the window it came
+         from rather than an empty box. It is replaced wholesale by the
+         first updateSubtitle() call. -->
+    <div class="box dark text-white placeholder" id="box">
+      <div class="original" id="orig" dir="auto">This is a real-time translation. You can speak and see the translation instantly.</div>
+      <div class="translated" id="trans" dir="auto">این یک ترجمهٔ زنده است. شما می‌توانید صحبت کنید و ترجمه را به‌صورت آنی ببینید.</div>
     </div>
   </div>
 
@@ -260,12 +276,13 @@
 
   /**
    * applyStyleFromParams()
-   * Usage: called once on load. Reads the caption-style params
-   * api.py's open_translation_window() put in the query string —
-   * position, appearance, textColor, fontSize, displayMode — and
-   * applies them so this window opens looking like the main stage
-   * rather than resetting to defaults. Every param is optional and
-   * falls back to the same default index.html starts with.
+   * Usage: called once on load, and again on resize. Reads the
+   * caption-style params api.py's open_translation_window() put in the
+   * query string — position, appearance, textColor, fontSize,
+   * fontFamily, displayMode — and applies them so this window opens
+   * looking like the main stage rather than resetting to defaults.
+   * Every param is optional and falls back to the same default
+   * index.html starts with.
    */
   function applyStyleFromParams() {
     const position = params.get('position') || 'bottom';
@@ -274,9 +291,21 @@
 
     const appearance = params.get('appearance') || 'dark';
     const textColor = params.get('textColor') || 'white';
+    // The placeholder class is preserved across restyles so a resize
+    // before the first result doesn't un-dim the placeholder text.
+    const isPlaceholder = box.classList.contains('placeholder');
     box.className = 'box ' +
       (['dark', 'light', 'custom'].includes(appearance) ? appearance : 'dark') +
-      ' text-' + (textColor === 'black' ? 'black' : 'white');
+      ' text-' + (textColor === 'black' ? 'black' : 'white') +
+      (isPlaceholder ? ' placeholder' : '');
+
+    // Font family arrives as a complete CSS stack rather than a key, so
+    // adding a font to the picker in index.html needs no change here.
+    // Empty means "whatever the page's default is".
+    const fontFamily = params.get('fontFamily');
+    if (fontFamily) {
+      box.style.fontFamily = fontFamily;
+    }
 
     // Font size has to satisfy TWO constraints, and the smaller wins.
     //
@@ -343,23 +372,63 @@
    * actually restores the minimized main window (see api.py's
    * _on_translation_closed). Deliberately routed through Python rather
    * than window.close() so the restore happens no matter how this
-   * window is dismissed, including via the OS window chrome.
+   * window is dismissed.
+   *
+   * Guarded so that one user gesture produces exactly ONE destroy.
+   * Without the guard, closing threw System.ObjectDisposedException on
+   * the Python side every single time: destroying the window is not
+   * instantaneous, so a second call arriving milliseconds later found
+   * a Form that had already been disposed. The window still closed, but
+   * every close left a traceback in the log — the kind of routine noise
+   * that hides a real failure when one eventually happens.
+   *
+   * The flag is released after a moment rather than latched forever, so
+   * that if a close genuinely fails (no bridge yet, and window.close()
+   * blocked) the user can still try again instead of being stuck in a
+   * window with no title bar.
+   *
+   * The bridge is re-checked on every call rather than captured once,
+   * and window.close() is kept as a last resort: pywebview injects
+   * window.pywebview.api asynchronously, so an impatient click a
+   * fraction of a second after the window appears can arrive before it
+   * exists. Without the fallback that click would do nothing at all,
+   * on a window whose whole point is that this button is one of only
+   * two ways to close it.
    */
+  let closeRequested = false;
   function closeWindow() {
-    if (window.pywebview &&
-        window.pywebview.api &&
-        window.pywebview.api.close_translation_window) {
-      window.pywebview.api.close_translation_window();
+    if (closeRequested) return;
+    closeRequested = true;
+    setTimeout(() => { closeRequested = false; }, 1500);
+
+    const api = window.pywebview && window.pywebview.api;
+    if (api && api.close_translation_window) {
+      try {
+        api.close_translation_window();
+        return;
+      } catch (err) {
+        console.error('close_translation_window failed', err);
+      }
     }
+    window.close();
   }
 
+  // click only. A pointerup handler was tried here as well, on the
+  // theory that a touch display might not synthesize a click — but
+  // pointerup fires BEFORE click for an ordinary mouse press, and
+  // preventDefault() on it does not suppress the click that follows, so
+  // every mouse press ran this twice. Browsers do synthesize click from
+  // a tap, so the extra handler bought nothing and cost a double close.
   document.getElementById('closeBtn').addEventListener('click', closeWindow);
-  document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') closeWindow();
+
+  // Bound to the document only. keydown bubbles document -> window, so
+  // listening on both fired this twice for a single Esc press.
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' || e.keyCode === 27) closeWindow();
   });
 
-  // The Esc hint has done its job after a few seconds; fade it out so
-  // it isn't sitting on screen for the whole presentation.
+  // The Esc hint has done its job after a few seconds; hide it so it
+  // isn't sitting on screen for the whole presentation.
   setTimeout(() => document.getElementById('hint').classList.add('gone'), 5000);
 
   /**
@@ -371,6 +440,8 @@
    * knowing anything about which is which.
    */
   window.updateSubtitle = function (original, translated, isFinal) {
+    // The first real result retires the placeholder styling for good.
+    box.classList.remove('placeholder');
     origEl.textContent = original || '';
     transEl.textContent = translated || '';
     // classList, not style.opacity — see the .interim CSS rule.
