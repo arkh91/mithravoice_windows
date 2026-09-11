@@ -109,6 +109,24 @@ Translation continues without Internet
 | **Online Only** | Azure | Yes | No | N/A |
 | **Offline Only** | Local | No | N/A | No |
 
+## Usage Reporting
+
+MithraVoice usage reporting applies **only to the Azure online engine**.
+
+- **Azure / Online engine:** Usage is reported while Azure Speech Translation is actively being used.
+- **Offline engine:** No usage reporting is performed. Offline speech recognition and translation do not send usage information to the online usage-reporting service.
+- **Auto mode:** Usage reporting follows the engine that is actually running. While Auto is using Azure, online usage reporting applies. If Auto switches to the offline engine because connectivity is lost, online usage reporting stops with the Azure session.
+- **Offline Only:** No usage reporting is performed at any time.
+
+This distinction is important: using the local offline engine does **not** consume or report Azure online usage.
+
+| Engine State | Usage Reporting |
+|---|---|
+| **Azure Online** | Yes |
+| **Auto → Azure** | Yes |
+| **Auto → Offline** | No |
+| **Offline Only** | No |
+
 ## Connectivity Detection
 
 MithraVoice does not rely only on the browser's `navigator.onLine` flag to decide whether Azure is usable.
